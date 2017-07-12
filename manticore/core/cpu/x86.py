@@ -1,12 +1,9 @@
 from capstone import *
 from capstone.x86 import *
-from .abstractcpu import Cpu, RegisterFile, Operand, SANE_SIZES, instruction
-from .abstractcpu import SymbolicPCException, InvalidPCException, Interruption, Sysenter, Syscall, ConcretizeRegister, ConcretizeArgument
-import sys
-import struct
-import types
-import weakref
-from functools import wraps, partial
+from .abstractcpu import Abi, SyscallAbi, Cpu, RegisterFile, Operand, instruction
+from .abstractcpu import ConcretizeRegister, ConcretizeRegister, ConcretizeArgument
+from .abstractcpu import Interruption, Syscall
+from functools import wraps
 import collections
 from ..smtlib import *
 from ..memory import MemoryException
@@ -59,7 +56,7 @@ def rep(old_method):
             counter_name = {16: 'CX', 32: 'ECX', 64: 'RCX'}[cpu.instruction.addr_size*8] 
             count = cpu.read_register(counter_name)
             if issymbolic(count):
-                raise ConcretizeRegister(counter_name, "Concretizing {} on REP instruction".format(counter_name), policy='SAMPLED')
+                raise ConcretizeRegister(cpu, counter_name, "Concretizing {} on REP instruction".format(counter_name), policy='SAMPLED')
 
             FLAG = count != 0
 
@@ -87,7 +84,7 @@ def repe(old_method):
             counter_name = {16: 'CX', 32: 'ECX', 64: 'RCX'}[cpu.instruction.addr_size*8] 
             count = cpu.read_register(counter_name)
             if issymbolic(count):
-                raise ConcretizeRegister(counter_name, "Concretizing {} on REP instruction".format(counter_name), policy='SAMPLED')
+                raise ConcretizeRegister(cpu, counter_name, "Concretizing {} on REP instruction".format(counter_name), policy='SAMPLED')
 
             FLAG = count != 0
 
@@ -104,7 +101,7 @@ def repe(old_method):
                     FLAG = Operators.AND(cpu.ZF == False, count != 0) #true FLAG means loop
 
             #if issymbolic(FLAG):
-            #    raise ConcretizeRegister('ZF', "Concretizing ZF on REP instruction", policy='ALL')
+            #    raise ConcretizeRegister(cpu, 'ZF', "Concretizing ZF on REP instruction", policy='ALL')
 
             #if not FLAG:
             cpu.PC += Operators.ITEBV(cpu.address_bit_size, FLAG, 0, cpu.instruction.size)
@@ -754,17 +751,6 @@ class X86Cpu(Cpu):
             if address+offset in cache:
                 del cache[address+offset]
 
-    def get_syscall_description(self):
-        # Syscall number is in RAX
-        # Arguments are in RDI, RSI, RDX, R10, R8 and R9
-        # Return is in RAX
-        index = self.RAX
-        arguments = [ self.RDI, self.RSI, self.RDX, self.R10, self.R8, self.R9 ]
-        def writeResult(result, self=self):
-            self.RAX = result
-        return (index, arguments, writeResult)
-
-
     def canonicalize_instruction_name(self, instruction):
         #MOVSD
         if instruction.opcode[0] in (0xa4, 0xa5): 
@@ -826,7 +812,7 @@ class X86Cpu(Cpu):
                           0x1: (0x1c004122, 0x01c0003f, 0x0000003f, 0x00000000),
                           0x2: (0x1c004143, 0x01c0003f, 0x000001ff, 0x00000000),
                           0x3: (0x1c03c163, 0x03c0003f, 0x00000fff, 0x00000006)},
-                   0x7:        (0x00000000, 0xffffffff, 0x00000000, 0x00000000),
+                   0x7:        (0x00000000, 0x00000000, 0x00000000, 0x00000000),
                    0x8:        (0x00000000, 0x00000000, 0x00000000, 0x00000000),
                    0xb: { 0x0: (0x00000001, 0x00000002, 0x00000100, 0x00000005),
                           0x1: (0x00000004, 0x00000004, 0x00000201, 0x00000003)},
@@ -2477,7 +2463,7 @@ class X86Cpu(Cpu):
 
 
     @instruction
-    def MOV(cpu, dest, src):
+    def MOV(cpu, dest, src, *rest): # Fake argument to work around capstone issue # 950
         ''' 
         Move.
         
@@ -2491,6 +2477,7 @@ class X86Cpu(Cpu):
         :param cpu: current CPU.
         :param dest: destination operand.        
         :param src: source operand.
+        :param rest: workaround for a capstone bug, should never be provided
         '''
         dest.write(src.read())
 
@@ -4583,9 +4570,71 @@ class X86Cpu(Cpu):
         '''
         res = dest.write(dest.read() ^ src.read())
 
+    def _PUNPCKL(cpu, dest, src, item_size):
+        '''
+        Generic PUNPCKL
+        '''
+        assert dest.size == src.size
+        size = dest.size
+        dest_value = dest.read()
+        src_value = src.read()
+        mask = (1 << item_size)-1
+        res = 0
+        count =0 
+        for pos in xrange(0, size/item_size):
+            if count >= size:
+                break
+            item0 = Operators.ZEXTEND( ( dest_value >> (pos * item_size) )& mask, size)
+            item1 = Operators.ZEXTEND( ( src_value >> (pos * item_size) )& mask, size)
+            res |= item0 << count
+            count += item_size
+            res |= item1 << count
+            count += item_size
+
+        dest.write(res)
+
+    def _PUNPCKH(cpu, dest, src, item_size):
+        '''
+        Generic PUNPCKH
+        '''
+        assert dest.size == src.size
+        size = dest.size
+        dest_value = dest.read()
+        src_value = src.read()
+        mask = (1 << item_size)-1
+        res = 0
+        count = 0
+        for pos in reversed(xrange(0, size/item_size)):
+            if count >= size:
+                break
+            item0 = Operators.ZEXTEND( ( dest_value >> (pos * item_size) )& mask, size)
+            item1 = Operators.ZEXTEND( ( src_value >> (pos * item_size) )& mask, size)
+            res = res << item_size
+            res |= item1
+            res = res << item_size
+            res |= item0
+            count += item_size*2
+
+        dest.write(res)
 
     @instruction
-    def PUNPCKLBW(cpu, op0, op1):
+    def PUNPCKHBW(cpu, dest, src):
+        cpu._PUNPCKH(dest, src, 8)
+
+    @instruction
+    def PUNPCKHWD(cpu, dest, src):
+        cpu._PUNPCKH(dest, src, 16)
+
+    @instruction
+    def PUNPCKHDQ(cpu, dest, src):
+        cpu._PUNPCKH(dest, src, 32)
+
+    @instruction
+    def PUNPCKHQDQ(cpu, dest, src):
+        cpu._PUNPCKH(dest, src, 64)
+
+    @instruction
+    def PUNPCKLBW(cpu, dest, src):
         '''
         Interleaves the low-order bytes of the source and destination operands.
         
@@ -4594,22 +4643,10 @@ class X86Cpu(Cpu):
         destination operand.
 
         :param cpu: current CPU.
-        :param op0: destination operand.
-        :param op1: source operand.
+        :param dest: destination operand.
+        :param src: source operand.
         '''
-        size = op0.size
-        arg0 = op0.read()
-        arg1 = op1.read()
-
-        res = 0
-        for pos in reversed(xrange(0, size/2, 8)):
-            byte0 = Operators.ZEXTEND( ( arg0 >> pos )& 0xff, size)
-            byte1 = Operators.ZEXTEND( ( arg1 >> pos )& 0xff, size)
-            res = res << 8
-            res |= byte1
-            res = res << 8
-            res |= byte0
-        op0.write(res)
+        cpu._PUNPCKL(dest, src, 8)
 
     @instruction
     def PUNPCKLWD(cpu, dest, src):
@@ -4621,23 +4658,10 @@ class X86Cpu(Cpu):
         destination operand.
 
         :param cpu: current CPU.
-        :param op0: destination operand.
-        :param op1: source operand.
+        :param dest: destination operand.
+        :param src: source operand.
         '''
-        size = dest.size
-        arg0 = dest.read()
-        arg1 = src.read()
-
-        res = 0
-        for pos in reversed(xrange(0, size, 8)):
-            elem0 = Operators.ZEXTEND( ( arg0 >> pos )& 0xff, size)
-            elem1 = Operators.ZEXTEND( ( arg1 >> pos )& 0xff, size)
-            res = res << 8
-            res |= elem1
-            res = res << 8
-            res |= elem0
-            
-        dest.write(res)
+        cpu._PUNPCKL(dest, src, 16)
 
     @instruction
     def PUNPCKLQDQ(cpu, dest, src):
@@ -4649,49 +4673,25 @@ class X86Cpu(Cpu):
         destination operand.
 
         :param cpu: current CPU.
-        :param op0: destination operand.
-        :param op1: source operand.
+        :param dest: destination operand.
+        :param src: source operand.
         '''
-        size = dest.size
-        arg0 = dest.read()
-        arg1 = src.read()
-
-        res = 0
-        for pos in reversed(xrange(0, size/2, 8)):
-            elem0 = Operators.ZEXTEND( ( arg0 >> pos )& ((1 << size/2)-1), size)
-            elem1 = Operators.ZEXTEND( ( arg1 >> pos )& ((1 << size/2)-1), size)
-            res = res << (size/2)
-            res |= elem1
-            res = res << (size/2)
-            res |= elem0
-        dest.write(res)
+        cpu._PUNPCKL(dest, src, 64)
 
     @instruction
     def PUNPCKLDQ(cpu, dest, src):
         '''
-        Interleaves the low-order quad-words of the source and destination operands.
+        Interleaves the low-order double-words of the source and destination operands.
         
         Unpacks and interleaves the low-order data elements (bytes, words, doublewords, and quadwords)
         of the destination operand (first operand) and source operand (second operand) into the 
         destination operand.
 
         :param cpu: current CPU.
-        :param op0: destination operand.
-        :param op1: source operand.
+        :param dest: destination operand.
+        :param src: source operand.
         '''
-        size = dest.size
-        arg0 = dest.read()
-        arg1 = src.read()
-
-        res = 0
-        for pos in reversed(xrange(0, size/2, 8)):
-            elem0 = Operators.ZEXTEND( ( arg0 >> pos )& ((1 << size/2)-1), size)
-            elem1 = Operators.ZEXTEND( ( arg1 >> pos )& ((1 << size/2)-1), size)
-            res = res << (size/2)
-            res |= elem1
-            res = res << (size/2)
-            res |= elem0
-        dest.write(res)
+        cpu._PUNPCKL(dest, src, 32)
 
 
     @instruction
@@ -5166,6 +5166,22 @@ class X86Cpu(Cpu):
         '''
         res = dest.write(dest.read()^src.read())
 
+    @instruction
+    def VORPD(cpu, dest, src, src2):
+        '''
+        Performs a bitwise logical OR operation on the source operand (second operand) and second source operand (third operand)
+         and stores the result in the destination operand (first operand). 
+        '''
+        res = dest.write(src.read() | src2.read())
+
+    @instruction
+    def VORPS(cpu, dest, src, src2):
+        '''
+        Performs a bitwise logical OR operation on the source operand (second operand) and second source operand (third operand)
+         and stores the result in the destination operand (first operand). 
+        '''
+        res = dest.write(src.read() | src2.read())
+
  
     @instruction
     def PTEST(cpu, dest, src):
@@ -5548,7 +5564,7 @@ class X86Cpu(Cpu):
         
         :param cpu: current CPU. 
         '''
-        raise Sysenter()
+        raise Syscall()
 
     @instruction
     def TZCNT(cpu, dest, src):
@@ -5636,104 +5652,111 @@ class X86Cpu(Cpu):
 ################################################################################
 #Calling conventions
 
-class ABI:
-    '''IA32 Calling conventions
-        https://en.wikipedia.org/wiki/X86_calling_conventions
+class I386LinuxSyscallAbi(SyscallAbi):
     '''
-    @staticmethod
-    def cdecl(function):
-        '''C declaration
-            Subroutine arguments are passed on the stack. 
-            Integer values and memory addresses are returned in the EAX register
-        '''
-        argcount = function.func_code.co_argcount - 1
-        assert argcount >= 0
-        def cdecl_function(model):
-            cpu = model.current
-            base = cpu.STACK+4 #skip ret address
-            arguments = [ cpu.read_int(base + (i*4), 32) for i in xrange(argcount) ]
-            try:
-                cpu.EAX = function(model, *arguments)
-            except ConcretizeArgument as cae:
-                assert 0 <= cae.argnum < argcount
-                # concretize here
-                mem_addr = base+cae.argnum*4
-                raise ConcretizeMemory(mem_addr, 32, "Concretizing Function Argument", 'MINMAX')
+    i386 Linux system call ABI
+    '''
+    def syscall_number(self):
+        return self._cpu.EAX
 
-            cpu.EIP = cpu.pop(32)
-        return cdecl_function
+    def get_arguments(self):
+        for reg in ('EBX', 'ECX', 'EDX', 'ESI', 'EDI', 'EBP'):
+            yield reg
 
-    @staticmethod
-    def stdcall(function):
-        '''Standard calling convention
-            Subroutine arguments are passed on the stack. 
-            Callee is responsible for cleaning up the stack.
-            Return values are stored in the EAX register.
-        '''
-        argcount = function.func_code.co_argcount - 1
-        assert argcount >= 0
-        def stdcall_function(model):
-            cpu = model.current
-            # skip saved EIP on stack
-            base = cpu.STACK+4
-            arguments = [ cpu.read_int(base+(pos*4), 32) for pos in xrange(argcount) ]
-            try:
-                cpu.EAX = function(model, *arguments)
-            except ConcretizeArgument as cae:
-                assert 0 <= cae.argnum < argcount
-                # concretize here
-                mem_addr = base+cae.argnum*4
-                raise ConcretizeMemory(mem_addr, 32, "Concretizing Function Argument", 'MINMAX')
+    def write_result(self, result):
+        self._cpu.EAX = result
 
-            cpu.EIP = cpu.pop(32)
-            cpu.STACK += argcount*4
-        return stdcall_function
+class AMD64LinuxSyscallAbi(SyscallAbi):
+    '''
+    AMD64 Linux system call ABI
+    '''
 
-    @staticmethod
-    def thiscall(function):
-        pass
+    #TODO(yan): Floating point or wide arguments that deviate from the norm are
+    # not yet supported.
 
-    @staticmethod
-    def vectorcall(function):
-        pass
+    def syscall_number(self):
+        return self._cpu.RAX
 
-    '''AMD64 Calling conventions '''
-    @staticmethod
-    def systemV(function):
-        '''System V AMD64 calling convention
-            The first six integer or pointer arguments are passed in registers:
-                RDI, RSI, RDX, RCX, R8, and R9, 
-            Additional arguments are passed on the stack.
-            Return value is stored in RAX.[16]:22
-        '''
-        argcount = function.func_code.co_argcount - 1
-        assert argcount >= 0
-        def argument(cpu):
-            yield cpu.RDI
-            yield cpu.RSI
-            yield cpu.RDX
-            yield cpu.RCX
-            yield cpu.R8
-            yield cpu.R9
-            stack = cpu.STACK+8
-            while True:
-                yield cpu.read_int(stack,64)
-                stack += 8
-        def systemV_function(model):
-            cpu = model.current
-            arguments = [ next(argument(cpu)) for _ in xrange(argcount) ]
-            cpu.RAX = function(cpu, *arguments)
-            cpu.RIP = cpu.pop(64)
-        return systemV_function
+    def get_arguments(self):
+        for reg in ('RDI', 'RSI', 'RDX', 'R10', 'R8', 'R9'):
+            yield reg
 
-    @staticmethod
-    def msx64(function):
-        pass
+    def write_result(self, result):
+        self._cpu.RAX = result
+    
+
+class I386CdeclAbi(Abi):
+    '''
+    i386 cdecl function call semantics
+    '''
+    def get_arguments(self):
+        base = self._cpu.STACK + self._cpu.address_bit_size / 8
+        for address in self.values_from(base):
+            yield address
+
+    def write_result(self, result):
+        self._cpu.EAX = result
+
+    def ret(self):
+        self._cpu.EIP = self._cpu.pop(self._cpu.address_bit_size)
+        
+class I386StdcallAbi(Abi):
+    '''
+    x86 Stdcall function call convention. Callee cleans up the stack.
+    '''
+    def __init__(self, cpu):
+        super(I386StdcallAbi, self).__init__(cpu)
+        self._arguments = 0
+
+    def get_arguments(self):
+        base = self._cpu.STACK + self._cpu.address_bit_size / 8
+        for address in self.values_from(base):
+            self._arguments += 1
+            yield address
+
+    def write_result(self, result):
+        self._cpu.EAX = result
+
+    def ret(self):
+        self._cpu.EIP = self._cpu.pop(self._cpu.address_bit_size)
+
+        word_bytes = self._cpu.address_bit_size / 8
+        self._cpu.ESP += self._arguments * word_bytes
+        self._arguments = 0
+
+class SystemVAbi(Abi):
+    '''
+    x64 SystemV function call convention
+    '''
+
+    #TODO(yan): Floating point or wide arguments that deviate from the norm are
+    # not yet supported.
+
+    def get_arguments(self):
+        # First 6 arguments go in registers, rest are popped from stack
+        reg_args = ('RDI', 'RSI', 'RDX', 'RCX', 'R8', 'R9')
+
+        for reg in reg_args:
+            yield reg
+
+        word_bytes = self._cpu.address_bit_size / 8
+        for address in self.values_from(self._cpu.RSP + word_bytes):
+            yield address
+
+    def write_result(self, result):
+        # XXX(yan): Can also return in rdx for wide values.
+        self._cpu.RAX = result
+
+    def ret(self):
+        self._cpu.RIP = self._cpu.pop(self._cpu.address_bit_size)
+
+
 
 class AMD64Cpu(X86Cpu):
     #Config
     max_instr_width = 15
     address_bit_size = 64
+    machine = 'amd64'
     arch = CS_ARCH_X86
     mode = CS_MODE_64
 
@@ -5842,19 +5865,9 @@ class I386Cpu(X86Cpu):
     #Config
     max_instr_width = 15
     address_bit_size = 32
+    machine = 'i386'
     arch = CS_ARCH_X86
     mode = CS_MODE_32
-
-    def get_syscall_description(self):
-        # Syscall number is in RAX
-        # Arguments are in RDI, RSI, RDX, R10, R8 and R9
-        # Return is in RAX
-        index = self.EAX
-        arguments = [self.EBX, self.ECX, self.EDX, self.ESI, self.EDI, self.EBP]
-        def writeResult(result, self=self):
-            self.RAX = result
-        return (index, arguments, writeResult)
-
 
     def __init__(self, memory, *args, **kwargs):
         '''

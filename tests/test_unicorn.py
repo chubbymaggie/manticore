@@ -3,11 +3,11 @@ import struct
 from functools import wraps
 
 from manticore.core.cpu.arm import Armv7Cpu as Cpu, Mask, Interruption
-from manticore.core.cpu.abstractcpu import ConcretizeMemory, ConcretizeRegister
-from manticore.core.memory import Memory32, SMemory32
-from manticore.core.executor import State
+from manticore.core.cpu.abstractcpu import ConcretizeRegister
+from manticore.core.memory import ConcretizeMemory, Memory32, SMemory32
+from manticore.core.state import State
 from manticore.core.smtlib import BitVecVariable, ConstraintSet
-from manticore.models import linux
+from manticore.platforms import linux
 from manticore.utils.emulate import UnicornEmulator
 
 from capstone.arm import *
@@ -20,7 +20,7 @@ import logging
 logger = logging.getLogger("ARM_TESTS")
 
 __doc__ = '''
-Test the Unicorn emulation stub.  Armv7UnicornInstructions includes all 
+Test the Unicorn emulation stub.  Armv7UnicornInstructions includes all
 semantics from ARM tests to ensure that they match. UnicornConcretization tests
 to make sure symbolic values get properly concretized.
 '''
@@ -34,9 +34,9 @@ def assemble(asm):
 
 def emulate_next(cpu):
     'Read the next instruction and emulate it with Unicorn '
-    instruction = cpu.decode_instruction(cpu.PC)
+    cpu.decode_instruction(cpu.PC)
     emu = UnicornEmulator(cpu)
-    emu.emulate(instruction)
+    emu.emulate(cpu.instruction)
 
 
 def itest(asm):
@@ -89,6 +89,7 @@ class Armv7UnicornInstructions(unittest.TestCase):
     Import all of the tests from ARM, but execute with Unicorn to verify that
     all semantics match.
     '''
+    _multiprocess_can_split_ = True
     def setUp(self):
         self.cpu = Cpu(Memory32())
         self.mem = self.cpu.memory
@@ -1317,9 +1318,9 @@ class UnicornConcretization(unittest.TestCase):
     def get_state(cls):
         if cls.cpu is None:
             constraints = ConstraintSet()
-            model = linux.SLinux(constraints, '/bin/ls', argv=[], envp=[])
-            cls.state = State(constraints, model)
-            cls.cpu = model._mk_proc('armv7')
+            platform = linux.SLinux('/bin/ls')
+            cls.state = State(constraints, platform)
+            cls.cpu = platform._mk_proc('armv7')
         return (cls.cpu, cls.state)
 
 

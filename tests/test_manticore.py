@@ -3,6 +3,7 @@ import unittest
 from manticore import Manticore
 
 class ManticoreTest(unittest.TestCase):
+    _multiprocess_can_split_ = True
     def setUp(self):
         self.m = Manticore('tests/binaries/arguments_linux_amd64')
 
@@ -20,21 +21,31 @@ class ManticoreTest(unittest.TestCase):
             pass
         self.assertTrue(tmp in self.m._hooks[entry])
 
+    def test_hook(self):
+        self.m.context['x'] = 0
+
+        @self.m.hook(None)
+        def tmp(state):
+            self.m.context['x'] = 1
+            self.m.terminate()
+        self.m.run()
+
+        self.assertEqual(self.m.context['x'], 1)
+
     def test_hook_dec_err(self):
         with self.assertRaises(TypeError):
             @self.m.hook('0x00400e40')
             def tmp(state):
                 pass
 
-    @unittest.skip('TODO(mark): (#52) activating this test breaks something z3 related for following tests')
     def test_integration_basic_stdin(self):
         import os, struct
         self.m = Manticore('tests/binaries/basic_linux_amd64')
         self.m.run()
-        workspace = os.path.join(os.getcwd(), self.m.workspace)
-        with open(os.path.join(workspace, 'test_00000001.stdin')) as f:
+        workspace = self.m._output.uri# os.path.join(os.getcwd(), self.m.workspace)
+        with open(os.path.join(workspace, 'test_00000000.stdin')) as f:
             a = struct.unpack('<I', f.read())[0]
-        with open(os.path.join(workspace, 'test_00000002.stdin')) as f:
+        with open(os.path.join(workspace, 'test_00000001.stdin')) as f:
             b = struct.unpack('<I', f.read())[0]
         if a > 0x41:
             self.assertTrue(a > 0x41)

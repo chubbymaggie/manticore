@@ -4,11 +4,12 @@ import sys, os, struct
 from ..core.memory import Memory, MemoryException, SMemory32, Memory32
 from ..core.smtlib import Expression, Operators, solver
 # TODO use cpu factory
-from ..core.cpu.x86 import I386Cpu, Sysenter
-from ..core.cpu.abstractcpu import Interruption, Syscall, \
-        ConcretizeRegister, ConcretizeArgument, IgnoreAPI
-from ..core.executor import ForkState, SyscallNotImplemented
+from ..core.cpu.x86 import I386Cpu, I386StdcallAbi, Syscall
+from ..core.cpu.abstractcpu import Interruption, Syscall
+from ..core.state import ForkState, TerminateState
 from ..utils.helpers import issymbolic
+from ..platforms.platform import *
+from ..utils.event import Signal, forward_signals
 
 from ..binary.pe import minidump
 
@@ -17,11 +18,12 @@ import StringIO
 import logging
 import random
 from windows_syscalls import syscalls_num
-logger = logging.getLogger("MODEL")
+logger = logging.getLogger("PLATFORM")
 
-class ProcessExit(Exception):
-    def __init__(self, code):
-        super(ProcessExit, self).__init__("Process exited correctly. Code: %s"%code)
+
+class SyscallNotImplemented(TerminateState):
+    def __init__(self, message):
+        super(SyscallNotImplemented,self).__init__(message, testcase=True)
 
 class RestartSyscall(Exception):
     pass
@@ -31,11 +33,6 @@ class Deadlock(Exception):
 
 class SymbolicAPIArgument(Exception):
     pass
-
-class SymbolicSyscallArgument(ConcretizeRegister):
-    def __init__(self, number, message='Concretizing syscall argument', policy='SAMPLED'):
-        reg_name = ['EBX', 'ECX', 'EDX', 'ESI', 'EDI', 'EBP' ][number]
-        super(SymbolicSyscallArgument, self).__init__(reg_name, message, policy)
 
 #FIXME Consider moving this to executor.state?
 def toStr(state, value):
@@ -47,9 +44,9 @@ def toStr(state, value):
             value = minmax[0]
     return '{:08x}'.format(value)
 
-class Windows(object):
+class Windows(Platform):
     '''
-    A simple Windows Operating System Model.
+    A simple Windows Operating System platform.
     This class emulates some Windows system calls
     '''
 
@@ -68,7 +65,7 @@ class Windows(object):
 
     def __init__(self, path, additional_context = None, snapshot_folder=None):
         '''
-        Builds a Windows OS model
+        Builds a Windows OS platform
         '''
         self.clocks = 0
         self.files = [] 
@@ -89,7 +86,7 @@ class Windows(object):
             self.flavor = "Windows10SP%d"%minor
         else:
             raise NotImplementedError("Windows version {}.{} not supported".format(major, minor))
-        logger.info('Initializing %s model', self.flavor)
+        logger.info('Initializing %s platform', self.flavor)
 
         # Setting up memory maps
         memory = self._mk_memory()
@@ -178,7 +175,15 @@ class Windows(object):
         assert nprocs > 0
         assert len(self.running) == 1, "For now lets consider only one thread running"
         self._current = self.running[0]
+
+        #Install event forwarders
+        for proc in self.procs:
+            forward_signals(self, proc)
         
+
+    @property
+    def _function_abi(self):
+        return I386StdcallAbi(self.procs[0])
 
     @property
     def current(self):
@@ -208,6 +213,10 @@ class Windows(object):
         self.syscall_trace = state['syscall_trace']
         self.files = state['files']
         self.flavor = state['flavor']
+
+        #Install event forwarders
+        for proc in self.procs:
+            forward_signals(self, proc)
 
     def _read_string(self, cpu, buf):
         """
@@ -324,7 +333,7 @@ class Windows(object):
             self.clocks += 1
             if self.clocks % 10000 == 0:
                 self.sched()
-        except Sysenter as e:
+        except Syscall as e:
             try:
                 e = None
                 self.sysenter(self.current)
@@ -426,7 +435,7 @@ class Windows(object):
 
 class SWindows(Windows):
     '''
-    A symbolic extension of a Decree Operating System Model.
+    A symbolic extension of a Decree Operating System platform.
     '''
     def __init__(self, constraints, path, additional_context=None, snapshot_folder=None):
         '''
@@ -438,12 +447,19 @@ class SWindows(Windows):
         self._constraints =  constraints
         super(SWindows, self).__init__(path, additional_context, snapshot_folder)
 
-    def _mk_memory(self):
-        return SMemory32(self.constraints)
-
     @property
     def constraints(self):
         return self._constraints
+
+    @constraints.setter
+    def constraints(self, constraints):
+        self._constraints = constraints
+        for proc in self.procs:
+            proc.memory.constraints = constraints
+
+
+    def _mk_memory(self):
+        return SMemory32(self.constraints)
 
     #marshaling/pickle
     def __getstate__(self):
@@ -454,7 +470,6 @@ class SWindows(Windows):
     def __setstate__(self, state):
         self._constraints = state['constraints']
         super(SWindows, self).__setstate__(state)
-
 
 def readStringFromPointer(state, cpu, ptr, utf16, max_symbols=8):
 
@@ -510,50 +525,50 @@ def readStringFromPointer(state, cpu, ptr, utf16, max_symbols=8):
 class ntdll(object):
 
     @staticmethod
-    def NtWriteFile(model, FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key):
-        return model.NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key)
+    def NtWriteFile(platform, FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key):
+        return platform.NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key)
  
     @staticmethod
-    def NtReleaseKeyedEvent(model, KeyedEventHandle, Key, Alertable, Timeout):
-        return model.NtReleaseKeyedEvent(KeyedEventHandle, Key, Alertable, Timeout)
+    def NtReleaseKeyedEvent(platform, KeyedEventHandle, Key, Alertable, Timeout):
+        return platform.NtReleaseKeyedEvent(KeyedEventHandle, Key, Alertable, Timeout)
 
     @staticmethod
-    def NtQueryPerformanceCounter(model, PerformanceCounter, PerformanceFrequency):
-        return model.NtQueryPerformanceCounter(PerformanceCounter, PerformanceFrequency)
+    def NtQueryPerformanceCounter(platform, PerformanceCounter, PerformanceFrequency):
+        return platform.NtQueryPerformanceCounter(PerformanceCounter, PerformanceFrequency)
 
     @staticmethod
-    def NtClose(model, Handle):
-        return model.NtClose(Handle)
+    def NtClose(platform, Handle):
+        return platform.NtClose(Handle)
 
     @staticmethod
-    def RtlAllocateHeap(model, handle, flags, size):
+    def RtlAllocateHeap(platform, handle, flags, size):
         if issymbolic(size):
             logger.info("RtlAllcoateHeap({}, {}, SymbolicSize); concretizing size".format(str(handle), str(flags)) )
-            raise ConcretizeArgument(2)
+            raise ConcretizeArgument(platform.current, 2)
         else:
             raise IgnoreAPI("RtlAllocateHeap({}, {}, {:08x})".format(str(handle), str(flags), size))
 
     @staticmethod
-    def RtlpReportHeapFailure(model):
+    def RtlpReportHeapFailure(platform):
         raise MemoryException("Heap Failure Detected via RtlpReportHeapFailure!", 0xFFFFFFFF)
 
     @staticmethod
-    def RtlpLogHeapFailure(model):
+    def RtlpLogHeapFailure(platform):
         raise MemoryException("Heap Failure Detected via RtlpLogHeapFailure!", 0xFFFFFFFE)
 
 
 class kernel32(object):
 
     @staticmethod
-    def RegOpenKeyExW(model, hKey, lpSubKey, ulOptions, samDesired, phkResult):
-        return kernel32._RegOpenKeyEx(model, True, hKey, lpSubKey, ulOptions, samDesired, phkResult)
+    def RegOpenKeyExW(platform, hKey, lpSubKey, ulOptions, samDesired, phkResult):
+        return kernel32._RegOpenKeyEx(platform, True, hKey, lpSubKey, ulOptions, samDesired, phkResult)
 
     @staticmethod
-    def RegOpenKeyExA(model, hKey, lpSubKey, ulOptions, samDesired, phkResult):
-        return kernel32._RegOpenKeyEx(model, False, hKey, lpSubKey, ulOptions, samDesired, phkResult)
+    def RegOpenKeyExA(platform, hKey, lpSubKey, ulOptions, samDesired, phkResult):
+        return kernel32._RegOpenKeyEx(platform, False, hKey, lpSubKey, ulOptions, samDesired, phkResult)
 
     @staticmethod
-    def _RegOpenKeyEx(model, utf16, hKey, lpSubKey, ulOptions, samDesired, phkResult):
+    def _RegOpenKeyEx(platform, utf16, hKey, lpSubKey, ulOptions, samDesired, phkResult):
         """LONG WINAPI RegOpenKeyEx(
            _In_     HKEY    hKey,
            _In_opt_ LPCTSTR lpSubKey,
@@ -563,15 +578,15 @@ class kernel32(object):
            );
             Detect symbolic registry access. Attempt to simulate fake registry opening """
 
-        cpu = model.current
+        cpu = platform.current
         myname = "RegOpenKeyEx{}".format(utf16 and "W" or "A")
 
         try:
-            key_str = readStringFromPointer(model, cpu, lpSubKey, utf16)
+            key_str = readStringFromPointer(platform, cpu, lpSubKey, utf16)
         except MemoryException as me:
-            raise MemoryException("{}: {}".format(myname, me.cause), 0xFFFFFFFF)
+            raise MemoryException("{}: {}".format(myname, me.message), 0xFFFFFFFF)
         except SymbolicAPIArgument:
-            raise ConcretizeArgument(1)
+            raise ConcretizeArgument(platform.current, 1)
 
         logger.info("{}({}, [{}], {}, {}, {})".format(
             myname,
@@ -581,20 +596,20 @@ class kernel32(object):
         if issymbolic(phkResult):
 
             #Check if the symbol has a single solution.
-            values = solver.get_all_values(model.constraints, phkResult, maxcnt=2, silent=True)
+            values = solver.get_all_values(platform.constraints, phkResult, maxcnt=2, silent=True)
             if len(values) == 1:
                 phkResult = values[0]
 
         if issymbolic(phkResult):
 
-            if solver.can_be_true(model.constraints, phkResult==0):
+            if solver.can_be_true(platform.constraints, phkResult==0):
                 raise ForkState(phkResult==0)
             else:
-                cpu.write_int(phkResult, model._getRegHandle(key_str), 32)
+                cpu.write_int(phkResult, platform._getRegHandle(key_str), 32)
                 return 0
 
         elif phkResult != 0:
-            cpu.write_int(phkResult, model._getRegHandle(key_str), 32)
+            cpu.write_int(phkResult, platform._getRegHandle(key_str), 32)
             return 0
         else:
             raise IgnoreAPI("{}({}, [{}], {}, {}, {})".format(myname,
@@ -602,19 +617,19 @@ class kernel32(object):
                 str(phkResult)))
 
     @staticmethod
-    def RegCreateKeyExW(model, hkey, lpSubKey, Reserved, lpClass, dwOptions, 
+    def RegCreateKeyExW(platform, hkey, lpSubKey, Reserved, lpClass, dwOptions, 
             samDesired, lpSecurityAttributes, phkResult, lpdwDisposition):
-        return kernel32._RegCreateKeyEx(model, True, hkey, lpSubKey, Reserved, lpClass, dwOptions, 
+        return kernel32._RegCreateKeyEx(platform, True, hkey, lpSubKey, Reserved, lpClass, dwOptions, 
             samDesired, lpSecurityAttributes, phkResult, lpdwDisposition)
 
     @staticmethod
-    def RegCreateKeyExA(model, hkey, lpSubKey, Reserved, lpClass, dwOptions, 
+    def RegCreateKeyExA(platform, hkey, lpSubKey, Reserved, lpClass, dwOptions, 
             samDesired, lpSecurityAttributes, phkResult, lpdwDisposition):
-        return kernel32._RegCreateKeyEx(model, False, hkey, lpSubKey, Reserved, lpClass, dwOptions, 
+        return kernel32._RegCreateKeyEx(platform, False, hkey, lpSubKey, Reserved, lpClass, dwOptions, 
             samDesired, lpSecurityAttributes, phkResult, lpdwDisposition)
 
     @staticmethod
-    def _RegCreateKeyEx(model, utf16, hKey, lpSubKey, Reserved, lpClass, dwOptions, 
+    def _RegCreateKeyEx(platform, utf16, hKey, lpSubKey, Reserved, lpClass, dwOptions, 
             samDesired, lpSecurityAttributes, phkResult, lpdwDisposition):
         """ LONG WINAPI RegCreateKeyEx(
           _In_       HKEY                  hKey,
@@ -627,15 +642,15 @@ class kernel32(object):
           _Out_      PHKEY                 phkResult,
           _Out_opt_  LPDWORD               lpdwDisposition
         );"""
-        cpu = model.current
+        cpu = platform.current
         myname = "RegCreateKeyEx{}".format(utf16 and "W" or "A")
 
         try:
-            key_str = readStringFromPointer(model, cpu, lpSubKey, utf16)
+            key_str = readStringFromPointer(platform, cpu, lpSubKey, utf16)
         except MemoryException as me:
-            raise MemoryException("{}: {}".format(myname, me.cause), 0xFFFFFFFF)
+            raise MemoryException("{}: {}".format(myname, me.message), 0xFFFFFFFF)
         except SymbolicAPIArgument:
-            raise ConcretizeArgument(1)
+            raise ConcretizeArgument(platform.current, 1)
 
         logger.info("{}({}, [{}], {}, {}, {}, {}, {}, {}, {})".format(myname,
             str(hKey), key_str, str(Reserved), str(lpClass), str(dwOptions), 
@@ -644,20 +659,20 @@ class kernel32(object):
         if issymbolic(phkResult):
 
             #Check if the symbol has a single solution.
-            values = solver.get_all_values(model.constraints, phkResult, maxcnt=2, silent=True)
+            values = solver.get_all_values(platform.constraints, phkResult, maxcnt=2, silent=True)
             if len(values) == 1:
                 phkResult = values[0]
 
         if issymbolic(phkResult):
 
-            if solver.can_be_true(model.constraints, phkResult==0):
+            if solver.can_be_true(platform.constraints, phkResult==0):
                 raise ForkState(phkResult==0)
             else:
-                cpu.write_int(phkResult, model._getRegHandle(key_str), 32)
+                cpu.write_int(phkResult, platform._getRegHandle(key_str), 32)
                 return 0
 
         elif phkResult != 0:
-            cpu.write_int(phkResult, model._getRegHandle(key_str), 32)
+            cpu.write_int(phkResult, platform._getRegHandle(key_str), 32)
             return 0
         else:
             raise IgnoreAPI("{}({}, [{}], {}, {}, {}, {}, {}, {}, {})".format(myname,
@@ -665,13 +680,13 @@ class kernel32(object):
                 str(lpSecurityAttributes), str(samDesired), str(phkResult), str(lpdwDisposition)))
 
     @staticmethod
-    def HeapAlloc(model, handle, flags, size):
-        ntdll.RtlAllocateHeap(model, handle, flags, size)
+    def HeapAlloc(platform, handle, flags, size):
+        ntdll.RtlAllocateHeap(platform, handle, flags, size)
 
     # TODO: move this to Windows class if we ever
     # implement a real handle table
     @staticmethod
-    def GetStdHandle(model, nStdHandle):
+    def GetStdHandle(platform, nStdHandle):
         logger.info("GetStdHandle(%x)", nStdHandle)
         # ignore nStdHandle -- just return a valid value
         STD_INPUT_HANDLE = -10
@@ -681,7 +696,7 @@ class kernel32(object):
         if issymbolic(nStdHandle):
 
             #Check if the symbol has a single solution.            
-            values = solver.get_all_values(model.constraints, nStdHandle, maxcnt=2, silent=True)
+            values = solver.get_all_values(platform.constraints, nStdHandle, maxcnt=2, silent=True)
             if len(values) == 1:
                 nStdHandle = values[0]
             else:
@@ -708,34 +723,34 @@ class kernel32(object):
             return -1 #INVALID_HANDLE_VALUE
 
     @staticmethod
-    def CloseHandle(model, hObject):
+    def CloseHandle(platform, hObject):
         logger.info("CloseHandle(%x)", hObject)
-        if model.NT_SUCCESS(model.NtClose(hObject)):
+        if platform.NT_SUCCESS(platform.NtClose(hObject)):
             return 1
         else:
             return 0
 
     # TODO: possibly implement using NtCreateFile and/or use a handle table
     @staticmethod
-    def CreateFileW(model, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile):
-        return kernel32._CreateFile(model, True, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile)
+    def CreateFileW(platform, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile):
+        return kernel32._CreateFile(platform, True, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile)
 
     @staticmethod
-    def CreateFileA(model, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile):
-        return kernel32._CreateFile(model, False, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile)
+    def CreateFileA(platform, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile):
+        return kernel32._CreateFile(platform, False, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile)
 
     @staticmethod
-    def _CreateFile(model, utf16, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile):
+    def _CreateFile(platform, utf16, lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile):
         '''https://msdn.microsoft.com/en-us/library/windows/desktop/aa363858(v=vs.85).aspx'''
 
-        cpu = model.current
+        cpu = platform.current
         try:
-            filename = readStringFromPointer(model, cpu, lpFileName, utf16)
+            filename = readStringFromPointer(platform, cpu, lpFileName, utf16)
         except MemoryException as me:
-            msg = "CreateFile{}: {}".format(utf16 and "W" or "A", me.cause)
+            msg = "CreateFile{}: {}".format(utf16 and "W" or "A", me.message)
             raise MemoryException(msg, 0xFFFFFFFF)
         except SymbolicAPIArgument:
-            raise ConcretizeArgument(0)
+            raise ConcretizeArgument(platform.current, 0)
 
 
         logger.info("""CreateFile%s(
@@ -748,20 +763,20 @@ class kernel32(object):
     _In_opt_ HANDLE                hTemplateFile: %s
     );""" % (utf16 and "W" or "A",
             filename,
-            toStr(model, dwDesiredAccess),
-            toStr(model, dwShareMode),
-            toStr(model, lpSecurityAttributes),
-            toStr(model, dwCreationDisposition),
-            toStr(model, dwFlagsAndAttributes),
-            toStr(model, hTemplateFile),))
+            toStr(platform, dwDesiredAccess),
+            toStr(platform, dwShareMode),
+            toStr(platform, lpSecurityAttributes),
+            toStr(platform, dwCreationDisposition),
+            toStr(platform, dwFlagsAndAttributes),
+            toStr(platform, hTemplateFile),))
 
-        cpu = model.current
+        cpu = platform.current
 
-        return model._fileHandle(lpFileName)
+        return platform._fileHandle(lpFileName)
 
     #TODO possibly implement via NtWriteFile
     @staticmethod
-    def WriteFile(model, hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, lpOverlapped):
+    def WriteFile(platform, hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, lpOverlapped):
         '''https://msdn.microsoft.com/en-us/library/windows/desktop/aa365747(v=vs.85).aspx'''
         logger.info("""WriteFile(
     _In_        HANDLE       hFile: %s,
@@ -770,25 +785,25 @@ class kernel32(object):
     _Out_opt_   LPDWORD      lpNumberOfBytesWritten: %s,
     _Inout_opt_ LPOVERLAPPED lpOverlapped: %s
     );"""%(
-        toStr(model, hFile),
-        toStr(model, lpBuffer),
-        toStr(model, nNumberOfBytesToWrite),
-        toStr(model, lpNumberOfBytesWritten),
-        toStr(model, lpOverlapped))
+        toStr(platform, hFile),
+        toStr(platform, lpBuffer),
+        toStr(platform, nNumberOfBytesToWrite),
+        toStr(platform, lpNumberOfBytesWritten),
+        toStr(platform, lpOverlapped))
     )
 
         if issymbolic(lpNumberOfBytesWritten):
 
             #Check if the symbol has a single solution.
-            values = solver.get_all_values(model.constraints, lpNumberOfBytesWritten, maxcnt=2, silent=True)
+            values = solver.get_all_values(platform.constraints, lpNumberOfBytesWritten, maxcnt=2, silent=True)
             if len(values) == 1:
                 logger.info("ONE VALUE lpNumberOfBytesWritten: {}".format(lpNumberOfBytesWritten))
                 lpNumberOfBytesWritten = values[0]
 
-        cpu = model.current
+        cpu = platform.current
         if issymbolic(lpNumberOfBytesWritten):
 
-            if solver.can_be_true(model.constraints, lpNumberOfBytesWritten==0):
+            if solver.can_be_true(platform.constraints, lpNumberOfBytesWritten==0):
                 raise ForkState(lpNumberOfBytesWritten==0)
 
             logger.info("WRITING TO SYMB lpNumberOfBytesWritten: {}".format(lpNumberOfBytesWritten))
@@ -800,23 +815,23 @@ class kernel32(object):
         return 1
 
     @staticmethod
-    def CreateProcessW(model, lpApplicationName, lpCommandLine, lpProcessAttributes, 
+    def CreateProcessW(platform, lpApplicationName, lpCommandLine, lpProcessAttributes, 
             lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment, 
             lpCurrentDirectory, lpStartupInfo, lpProcessInformation):
-        return kernel32._CreateProcess(model, True, lpApplicationName, lpCommandLine, lpProcessAttributes, 
+        return kernel32._CreateProcess(platform, True, lpApplicationName, lpCommandLine, lpProcessAttributes, 
                 lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment, 
                 lpCurrentDirectory, lpStartupInfo, lpProcessInformation)
 
     @staticmethod
-    def CreateProcessA(model, lpApplicationName, lpCommandLine, lpProcessAttributes, 
+    def CreateProcessA(platform, lpApplicationName, lpCommandLine, lpProcessAttributes, 
             lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment, 
             lpCurrentDirectory, lpStartupInfo, lpProcessInformation):
-        return kernel32._CreateProcess(model, False, lpApplicationName, lpCommandLine, lpProcessAttributes, 
+        return kernel32._CreateProcess(platform, False, lpApplicationName, lpCommandLine, lpProcessAttributes, 
                 lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment, 
                 lpCurrentDirectory, lpStartupInfo, lpProcessInformation)
 
     @staticmethod
-    def _CreateProcess(model, utf16, lpApplicationName, lpCommandLine, lpProcessAttributes, 
+    def _CreateProcess(platform, utf16, lpApplicationName, lpCommandLine, lpProcessAttributes, 
             lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment, 
             lpCurrentDirectory, lpStartupInfo, lpProcessInformation):
         """BOOL WINAPI CreateProcess(
@@ -833,23 +848,23 @@ class kernel32(object):
         );"""
 
         myname = "CreateProcess{}".format(utf16 and "W" or "A")
-        cpu = model.current
+        cpu = platform.current
 
         try:
-            appname = readStringFromPointer(model, cpu, lpApplicationName, utf16)
+            appname = readStringFromPointer(platform, cpu, lpApplicationName, utf16)
         except MemoryException as me:
-            msg = "{}: {}".format(myname, me.cause)
+            msg = "{}: {}".format(myname, me.message)
             raise MemoryException(msg, 0xFFFFFFFF)
         except SymbolicAPIArgument:
-            raise ConcretizeArgument(0)
+            raise ConcretizeArgument(platform.current, 0)
 
         try:
-            cmdline = readStringFromPointer(model, cpu, lpCommandLine, utf16)
+            cmdline = readStringFromPointer(platform, cpu, lpCommandLine, utf16)
         except MemoryException as me:
-            msg = "{}: {}".format(myname, me.cause)
+            msg = "{}: {}".format(myname, me.message)
             raise MemoryException(msg, 0xFFFFFFFF)
         except SymbolicAPIArgument:
-            raise ConcretizeArgument(1)
+            raise ConcretizeArgument(platform.current, 1)
 
         raise IgnoreAPI("{}([{}], [{}], {}, {}, {}, {}, {}, {}, {}, {})".format(myname,
             appname, cmdline, str(lpProcessAttributes), 

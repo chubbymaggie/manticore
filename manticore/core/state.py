@@ -1,55 +1,96 @@
+import os
+import copy
+import logging
 from collections import OrderedDict
 
-from .executor import manager
 from .smtlib import solver
 from ..utils.helpers import issymbolic
+from ..utils.event import Signal, forward_signals
 
-class AbandonState(Exception):
+
+#import exceptions
+from .cpu.abstractcpu import ConcretizeRegister
+from .memory import ConcretizeMemory, MemoryException
+from ..platforms.platform import *
+
+logger = logging.getLogger("STATE")
+
+class StateException(Exception):
+    ''' All state related exceptions '''
     pass
+
+
+class TerminateState(StateException):
+    ''' Terminates current state exploration '''
+    def __init__(self, message, testcase=False):
+        super(TerminateState, self).__init__(message)
+        self.testcase = testcase
+
+
+class Concretize(StateException):
+    ''' Base class for all exceptions that trigger the concretization 
+        of a symbolic expression
+
+        This will fork the state using a pre-set concretization policy
+        Optional `setstate` function set the state to the actual concretized value.
+        #Fixme Doc.
+
+    '''
+    _ValidPolicies = ['MINMAX', 'ALL', 'SAMPLED', 'ONE']
+    def __init__(self, message, expression, setstate=None, policy='ALL',  **kwargs):
+        assert policy in self._ValidPolicies, "Policy must be one of: %s"%(', '.join(self._ValidPolicies),)
+        self.expression = expression
+        self.setstate = setstate
+        self.policy = policy
+        self.message = "Concretize: %s (Policy: %s)"%(message, policy)
+        super(Concretize, self).__init__(**kwargs)
+
+
+class ForkState(Concretize):
+    ''' Specialized concretization class for Bool expressions. 
+        It tries True and False as concrete solutions. /
+
+        Note: as setstate is None the concrete value is not written back 
+        to the state. So the expression could still by symbolic(but constrained) 
+        in forked states.
+    '''
+    def __init__(self, message, expression, **kwargs):
+        assert isinstance(expression, Bool), 'Need a Bool to fork a state in two states'
+        super(ForkState, self).__init__(message, expression, policy='ALL', **kwargs)
+
+
+from ..utils.event import Signal
 
 
 class State(object):
     '''
     Representation of a unique program state/path.
 
-    :param ConstraintSet constraints: Initial constraints on state
-    :param model: Initial constraints on state
-    :type model: Decree or Linux or Windows
+    :param ConstraintSet constraints: Initial constraints 
+    :param Platform platform: Initial operating system state
+    :ivar dict context: Local context for arbitrary data storage
     '''
 
-    # Class global counter
-    _state_count = manager.Value('i', 0)
-    _lock = manager.Lock()
-
-    @staticmethod
-    def get_new_id():
-        with State._lock:
-            ret = State._state_count.value
-            State._state_count.value += 1
-        return ret
-
-    def __init__(self, constraints, model):
-        self.model = model
+    def __init__(self, constraints, platform):
+        self.platform = platform
         self.forks = 0
-        self.co = self.get_new_id()
         self.constraints = constraints
-        self.model._constraints = constraints
-        for proc in self.model.procs:
-            proc._constraints = constraints
-            proc.memory._constraints = constraints
+        self.platform.constraints = constraints
 
         self.input_symbols = list()
-        # Stats I'm not sure we need in general
-        self.last_pc = (None, None)
-        self.visited = set()
-        self.branches = OrderedDict()
         self._child = None
 
+        self.context = dict()
+        ##################################################################33
+        # Signals are lost in serialization and fork !!
+        #self.will_add_constraint = Signal()
+
+        #Import all signals from platform
+        forward_signals(self, platform)
+
     def __reduce__(self):
-        return (self.__class__, (self.constraints, self.model),
-                {'visited': self.visited, 'last_pc': self.last_pc, 'forks': self.forks,
-                 'co': self.co, 'input_symbols': self.input_symbols,
-                 'branches': self.branches})
+        return (self.__class__, (self.constraints, self.platform),
+                {'context': self.context, '_child': self._child, 'input_symbols': self.input_symbols})
 
     @staticmethod
     def state_count():
@@ -57,25 +98,20 @@ class State(object):
 
     @property
     def cpu(self):
-        return self.model.current
+        return self.platform.current
 
     @property
     def mem(self):
-        return self.model.current.memory
-
-    @property
-    def name(self):
-        return 'state_%06d.pkl' % (self.co)
+        return self.platform.current.memory
 
     def __enter__(self):
         assert self._child is None
-        new_state = State(self.constraints.__enter__(), self.model)
-        new_state.visited = set(self.visited)
-        new_state.forks = self.forks + 1
-        new_state.co = State.get_new_id()
+        new_state = State(self.constraints.__enter__(), self.platform)
         new_state.input_symbols = self.input_symbols
-        new_state.branches = self.branches
+        new_state.context = copy.deepcopy(self.context)
         self._child = new_state
+        
+        #fixme NEW State won't inherit signals (pro: added signals to new_state wont affect parent)
         return new_state
 
     def __exit__(self, ty, value, traceback):
@@ -83,19 +119,41 @@ class State(object):
         self._child = None
 
     def execute(self):
-        trace_item = (self.model._current, self.cpu.PC)
         try:
-            result = self.model.execute()
-        except:
-            trace_item = None
-            raise
-        assert self.model.constraints is self.constraints
+            result = self.platform.execute()
+
+        #Instead of State importing SymbolicRegisterException and SymbolicMemoryException 
+        # from cpu/memory shouldn't we import Concretize from linux, cpu, memory ?? 
+        # We are forcing State to have abstractcpu
+        except ConcretizeRegister as e:
+            expression = self.cpu.read_register(e.reg_name)
+            def setstate(state, value):
+                state.cpu.write_register(e.reg_name, value)
+            raise Concretize(e.message,
+                                expression=expression, 
+                                setstate=setstate,
+                                policy=e.policy)
+        except ConcretizeMemory as e:
+            expression = self.cpu.read_int(e.address, e.size)
+            def setstate(state, value):
+                state.cpu.write_int(e.reg_name, value, e.size)
+            raise Concretize(e.message,
+                                expression=expression, 
+                                setstate=setstate,
+                                policy=e.policy)
+        except MemoryException as e:
+            raise TerminateState(e.message, testcase=True)
+
+        #Remove when code gets stable?
+        assert self.platform.constraints is self.constraints
         assert self.mem.constraints is self.constraints
-        self.visited.add(trace_item)
-        self.last_pc = trace_item
         return result
 
-    def add(self, constraint, check=False):
+    def constrain(self, constraint):
+        '''Constrain state.
+
+        :param manticore.core.smtlib.Bool constraint: Constraint to add
+        '''
         self.constraints.add(constraint)
 
     def abandon(self):
@@ -103,7 +161,7 @@ class State(object):
 
         Note: This must be called from the Executor loop, or a :func:`~manticore.Manticore.hook`.
         '''
-        raise AbandonState
+        raise TerminateState("Abandoned state")
 
     def new_symbolic_buffer(self, nbytes, **options):
         '''Create and return a symbolic buffer of length `nbytes`. The buffer is
@@ -160,10 +218,15 @@ class State(object):
             size = len(data)
             symb = self.constraints.new_array(name=label, index_max=size)
             self.input_symbols.append(symb)
-            for j in xrange(size):
-                if data[j] != wildcard:
-                    symb[j] = data[j]
-            data = [symb[i] for i in range(size)]
+
+            tmp = []
+            for i in xrange(size):
+                if data[i] == wildcard:
+                    tmp.append(symb[i])
+                else:
+                    tmp.append(data[i])
+
+            data = tmp
 
         if string:
             for b in data:
@@ -174,6 +237,9 @@ class State(object):
         return data
 
     def concretize(self, symbolic, policy, maxcount=100):
+        ''' This finds a set of solutions for symbolic using policy.
+            This raises TooManySolutions if more solutions than maxcount 
+        '''
         vals = []
         if policy == 'MINMAX':
             vals = self._solver.minmax(self.constraints, symbolic)
@@ -211,7 +277,7 @@ class State(object):
         '''
         return self._solver.get_value(self.constraints, expr)
 
-    def solve_n(self, expr, nsolves=1, policy='minmax'):
+    def solve_n(self, expr, nsolves, policy='minmax'):
         '''
         Concretize a symbolic :class:`~manticore.core.smtlib.expression.Expression` into
         `nsolves` solutions.
@@ -222,6 +288,24 @@ class State(object):
         '''
         return self._solver.get_all_values(self.constraints, expr, nsolves, silent=True)
 
+    def solve_buffer(self, addr, nbytes):
+        '''
+        Reads `nbytes` of symbolic data from a buffer in memory at `addr` and attempts to
+        concretize it
+
+        :param int address: Address of buffer to concretize
+        :param int nbytes: Size of buffer to concretize
+        :return: Concrete contents of buffer
+        :rtype: list[int]
+        '''
+        buffer = self.cpu.read_bytes(addr, nbytes)
+        result = []
+        with self.constraints as temp_cs:
+            for c in buffer:
+                result.append(self._solver.get_value(temp_cs, c))
+                temp_cs.add(c == result[-1])
+        return result
+
     def record_branches(self, targets):
         _, branch = self.last_pc
         for target in targets:
@@ -230,3 +314,53 @@ class State(object):
                 self.branches[key] += 1
             except KeyError:
                 self.branches[key] = 1
+
+    def generate_inputs(self, workspace, generate_files=False):
+        '''
+        Save the inputs of the state
+
+        :param str workspace: the working directory
+        :param bool generate_files: true if symbolic files are also generated
+        '''
+
+        # Save constraints formula
+        smtfile = 'state_{:08x}.smt'.format(self.co)
+        with open(os.path.join(workspace, smtfile), 'wb') as f:
+            f.write(str(self.constraints))
+
+        # check that the state is sat
+        assert solver.check(self.constraints)
+
+        # save the inputs
+        for symbol in self.input_symbols:
+            buf = solver.get_value(self.constraints, symbol)
+            filename = os.path.join(workspace, 'state_{:08x}.txt'.format(self.co))
+            open(filename, 'a').write("{:s}: {:s}\n".format(symbol.name, repr(buf)))
+
+        # save the symbolic files
+        if generate_files:
+            files = getattr(self.platform, 'files', None)
+            if files is not None:
+                for f in files:
+                    array = getattr(f, 'array', None)
+                    if array is not None:
+                        buf = solver.get_value(self.constraints, array)
+                        filename = os.path.basename(array.name)
+                        filename = 'state_{:08x}.{:s}'.format(self.co, filename)
+                        filename = os.path.join(workspace, filename)
+                        with open(filename, 'a') as f:
+                            f.write("{:s}".format(buf))
+
+
+    def invoke_model(self, model):
+        '''
+        Invoke a `model`. A `model` is a callable whose first argument is a
+        :class:`~manticore.core.state.State`. If the `model` models a normal (non-variadic)
+        function, the following arguments correspond to the arguments of the C function
+        being modeled. If the `model` models a variadic function, the following argument
+        is a generator object, which can be used to access function arguments dynamically.
+
+        :param callable model: Model to invoke
+        '''
+        self.platform.invoke_model(model, prefix_args=(self,))
+

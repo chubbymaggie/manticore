@@ -15,15 +15,13 @@ except ImportError:
     pass
 sys.setrecursionlimit(10000)
 
-logger = logging.getLogger('MAIN')
-
 def parse_arguments():
     ###########################################################################
     # parse arguments
     parser = argparse.ArgumentParser(description='Symbolically analyze a program')
     parser.add_argument('--workspace', type=str, default=None,
                         help='A folder name for temporaries and results. (default mcore_?????)')
-    parser.add_argument('--verbose', action='store_true', help='Enable debug mode.')
+    parser.add_argument('-v', action='count', default=1, help='Specify verbosity level from -v to -vvvv')
     parser.add_argument('--profile', action='store_true', help='Enable profiling mode.')
 
     parser.add_argument('--buffer', type=str, help='Specify buffer to make symbolic')
@@ -40,7 +38,7 @@ def parse_arguments():
     parser.add_argument('--dumpafter', type=int, default=0, help='Dump state after every N instructions; 0 to disable')
     parser.add_argument('--maxstorage', type=int, default=0, help='Storage use cap in megabytes.')
     parser.add_argument('--maxstates', type=int, default=0, help='Maximun number of states to mantain at the same time')
-    parser.add_argument('--procs', type=int, default=1, help='Number of parallel workers to spawn')
+    parser.add_argument('--procs', type=int, default=1, help='Number of parallel processes to spawn')
     parser.add_argument('--timeout', type=int, default=0, help='Timeout. Abort exploration aftr TIMEOUT seconds')
     parser.add_argument('--replay', type=str, default=None,
                        help='The trace filename to replay')
@@ -95,9 +93,6 @@ def main():
     if args.names is not None:
         m.apply_model_hooks(args.names)
 
-    if args.procs:
-        m.workers = args.procs
-
     if args.env:
         for entry in args.env:
             name, val = entry[0].split('=')
@@ -106,17 +101,11 @@ def main():
     if args.assertions:
         m.load_assertions(args.assertions)
 
-    if args.verbose:
-        m.verbosity = 4
-    else:
-        m.verbosity = 1
+    m.verbosity = args.v
 
-    logger.info('Loading program: {}'.format(args.programs))
-    logger.info('Workspace: {}'.format(m.workspace))
+    m.run(args.procs, args.timeout)
 
-    m.run(args.timeout)
-
-    m.dump_stats()
+    #m.dump_stats()
 
 if __name__ == '__main__':
     main()

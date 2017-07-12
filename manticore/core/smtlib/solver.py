@@ -132,7 +132,7 @@ class Z3Solver(Solver):
         else:
             logger.debug(' Please install Z3 4.4.1 or newer to get optimization support')
 
-        self._command = 'z3 -t:30000 -smt2 -in'
+        self._command = 'z3 -t:120000 -smt2 -in'
         self._init = ['(set-logic QF_AUFBV)', '(set-option :global-decls false)']
         self._get_value_fmt = (re.compile('\(\((?P<expr>(.*))\ #x(?P<value>([0-9a-fA-F]*))\)\)'), 16)
 
@@ -351,7 +351,18 @@ class Z3Solver(Solver):
             while self._check() == 'sat':
                 value = self._getvalue(var)
                 result.append(value)
-                self._assert( var != value )
+
+                # Reset the solver to avoid the incremental mode 
+                # Triggered with two consecutive calls to check-sat
+                # Yet, if the number of solution is large, sending back
+                # the whole formula is more expensive
+                if len(result) < 50:
+                    self._reset(temp_cs.related_to(var) )
+                    for value in result:
+                        self._assert( var != value )
+                else:
+                    self._assert(var != value)
+                    
                 if len(result) >= maxcnt:
                     if silent:
                         # do not throw an exception if set to silent
@@ -386,8 +397,19 @@ class Z3Solver(Solver):
                 try:
                     self._assert( operation(X, aux) )
                     self._send('(%s %s)' % (goal, aux.name) )
-                    self._send('(check-sat)' )
-                    if self._recv() == 'sat': #first line
+                    self._send('(check-sat)')
+                    _status = self._recv()
+                    if _status not in ('sat', 'unsat', 'unknown'):
+                        # Minimize (or Maximize) sometimes prints the objective before the status
+                        # This will be a line like NAME |-> VALUE
+                        maybe_sat = self._recv()
+                        if maybe_sat == 'sat':
+                            pattern = re.compile('(?P<expr>.*?)\s+\|->\s+(?P<value>.*)', re.DOTALL)
+                            m = pattern.match(_status)
+                            expr, value = m.group('expr'), m.group('value')
+                            assert expr == aux.name
+                            return int(value)
+                    elif _status == 'sat':
                         ret = self._recv()
                         if not (ret.startswith('(') and ret.endswith(')')):
                             raise SolverException('bad output on max, z3 may have been killed')

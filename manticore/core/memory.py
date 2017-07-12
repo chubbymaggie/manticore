@@ -3,39 +3,64 @@ from weakref import WeakValueDictionary
 from cStringIO import StringIO
 from .smtlib import *
 import logging
-from .mappings import _mmap, _munmap
+from ..utils.mappings import _mmap, _munmap
 from ..utils.helpers import issymbolic
 
 logger = logging.getLogger('MEMORY')
+
 
 class MemoryException(Exception):
     '''
     Memory exceptions
     '''
-    def __init__(self, cause, address):
+    def __init__(self, message, address=None):
         '''
         Builds a memory exception.
 
-        :param cause: exception message.
+        :param message: exception message.
         :param address: memory address where the exception occurred.
         '''
-        super(MemoryException, self, ).__init__('{} <{}>'.format(cause, address))
-        self.cause = cause
         self.address = address
+        self.message = message
+        if address is not None and not issymbolic(address):
+            self.message += ' <{:x}>'.format(address)
 
     def __str__(self):
-        return '%s <%s>'%(self.cause, '%08x'%self.address)
+        return self.message
 
-class SymbolicMemoryException(MemoryException):
 
-    def __init__(self, cause, address, size, constraint):
-        super(SymbolicMemoryException, self, ).__init__(cause, address)
+class ConcretizeMemory(MemoryException):
+    '''
+    Raised when a symbolic memory cell needs to be concretized.
+    '''
+    def __init__(self, mem, address, size, policy='MINMAX'):
+        self.message = "Concretizing memory address {} size {}".format(address, size)
+        self.mem = mem
+        self.address = address
+        self.size = size
+        self.policy = policy
+
+
+class InvalidMemoryAccess(MemoryException):
+    _message = 'Invalid memory access'
+
+    def __init__(self, address, mode):
+        assert mode in 'rwx'
+        suffix = ' (mode:{})'.format(mode)
+        message = self._message + suffix
+        super(InvalidMemoryAccess, self, ).__init__(message, address)
+        self.mode = mode
+
+
+class InvalidSymbolicMemoryAccess(InvalidMemoryAccess):
+    _message = 'Invalid symbolic memory access'
+
+    def __init__(self, address, mode, size, constraint):
+        super(InvalidSymbolicMemoryAccess, self, ).__init__(address, mode)
         #the crashing constraint you need to assert 
         self.constraint = constraint 
         self.size = size
 
-    def __str__(self):
-        return '%s <%s>'%(self.cause, issymbolic(self.address) and repr(self.address) or '%08x'%self.address)
 
 class Map(object):
     '''
@@ -113,6 +138,19 @@ class Map(object):
         :rtype: str
         '''
         return '<%s 0x%016x-0x%016x %s>'%(self.__class__.__name__, self.start, self.end, self.perms)
+
+    def __cmp__(self, other):
+        result = cmp(self.start, other.start)
+        if result != 0:
+            return result
+        result = cmp(self.end, other.end)
+        if result != 0:
+            return result
+        # go by each char permission 
+        result = cmp(self.perms, other.perms)
+        if result != 0:
+            return result
+        return cmp(self.name, other.name)
 
     def _in_range(self, index):
         ''' Returns True if index is in range '''
@@ -386,14 +424,14 @@ class Memory(object):
         else:
             self._maps = set(maps)
         self._page2map = WeakValueDictionary()   #{page -> ref{MAP}}
-        self._callbacks = {}
+        self._recording_stack = []
         for m in self._maps:
             for i in range(self._page(m.start), self._page(m.end)):
                 assert i not in self._page2map
                 self._page2map[i] = m
 
     def __reduce__(self):
-        return (self.__class__, (self._maps, ), {'_callbacks': self._callbacks})
+        return (self.__class__, (self._maps, ))
 
     @abstractproperty
     def memory_bit_size(self):
@@ -485,7 +523,7 @@ class Memory(object):
                 return p << self.page_bit_size
             counter+=1
             if counter >= self.memory_size/self.page_size:
-                raise MemoryException('Not enough memory', 0)
+                raise MemoryException('Not enough memory')
 
         return self._search( size, self.memory_size-size, counter  )
 
@@ -703,21 +741,6 @@ class Memory(object):
     def __contains__(self, address):
         return self._page(address) in self._page2map
 
-    def set_callback(self, name, callback):
-        '''
-        Set or remove a callback for a named event.
-        Takes a callable that potentially receives parameter.
-
-        :param name: Callback name
-        :param callback: The Callable to register.
-        '''
-        if callback is None:
-            self._callbacks.pop(name,None)
-            return
-        if not hasattr(callback, '__call__'):
-            raise ValueError('Callback must be callable')
-        self.callback[name] = callback
-
     def perms(self, index):
         # not happy with this interface.
         if isinstance(index, slice):
@@ -751,7 +774,7 @@ class Memory(object):
     #write and read potentially symbolic bytes at symbolic indexes
     def read(self, addr, size):
         if not self.access_ok(slice(addr, addr+size), 'r'):
-            raise MemoryException('No access reading', addr)
+            raise InvalidMemoryAccess(addr, 'r')
 
         assert size > 0
         result = []
@@ -766,27 +789,59 @@ class Memory(object):
             p+=_size
         assert p == stop
 
-        if 'read' in self._callbacks:
-            self._callbacks['read'](addr, result)
-
         return result
+
+
+    def push_record_writes(self):
+        '''
+        Begin recording all writes. Retrieve all writes with `pop_record_writes()`
+        '''
+        self._recording_stack.append([])
+
+    def pop_record_writes(self):
+        '''
+        Stop recording trace and return a `list[(address, value)]` of all the writes
+        that occurred, where `value` is of type list[str]. Can be called without
+        intermediate `pop_record_writes()`.
+
+        For example::
+
+            mem.push_record_writes()
+                mem.write(1, 'a')
+                mem.push_record_writes()
+                    mem.write(2, 'b')
+                mem.pop_record_writes()  # Will return [(2, 'b')]
+            mem.pop_record_writes()  # Will return [(1, 'a'), (2, 'b')]
+
+        Multiple writes to the same address will all be included in the trace in the
+        same order they occurred.
+
+        :return: list[tuple]
+        '''
+
+        lst = self._recording_stack.pop()
+        # Append the current list to a previously-started trace.
+        if self._recording_stack:
+            self._recording_stack[-1].extend(lst)
+        return lst
 
     def write(self, addr, buf):
         size = len(buf)
         if not self.access_ok(slice(addr, addr + size), 'w'):
-            raise MemoryException('No access writing', addr)
+            raise InvalidMemoryAccess(addr, 'w')
         assert size > 0
         stop = addr + size
         start = addr
+
+        if self._recording_stack:
+            self._recording_stack[-1].append((addr, buf))
+
         while addr < stop:
             m = self.map_containing(addr)
             size = min(m.end-addr, stop-addr)
             m[addr:addr+size] = buf[addr-start:addr-start+size]
             addr+=size
         assert addr == stop
-
-        if 'write' in self._callbacks:
-            self._callbacks['write'](addr, buf)
 
     def _get_size(self, size):
         return size
@@ -836,6 +891,10 @@ class SMemory(Memory):
     def constraints(self):
         return self._constraints
 
+    @constraints.setter
+    def constraints(self, constraints):
+        self._constraints = constraints
+
     def _get_size(self, size):
         if isinstance(size, BitVec):
             size = arithmetic_simplifier(size)
@@ -873,13 +932,12 @@ class SMemory(Memory):
 
         if issymbolic(address):
             assert solver.check(self.constraints)
-            logger.info('Reading %d bytes from symbolic address %s', size, address)
+            logger.debug('Reading %d bytes from symbolic address %s', size, address)
             try:
                 solutions = solver.get_all_values(self.constraints, address, maxcnt=0x1000) #if more than 0x3000 exception
-            except TooManySolutions, e:
+            except TooManySolutions as e:
                 m, M = solver.minmax(self.constraints, address)
-                logger.info('Got TooManySolutions on a symbolic read. Range [%x, %x]. Not crashing!', m, M)
-                logger.info('Memory:%s',  self)
+                logger.debug('Got TooManySolutions on a symbolic read. Range [%x, %x]. Not crashing!', m, M)
 
                 crashing_condition = True
                 for start, end, perms, offset, name  in self.mappings():
@@ -888,7 +946,7 @@ class SMemory(Memory):
                             crashing_condition = Operators.AND(Operators.OR( (address+size).ult(start), address.uge(end) ), crashing_condition)
 
                 if solver.can_be_true(self.constraints, crashing_condition):
-                    raise SymbolicMemoryException('No access reading symbolic', address, size, crashing_condition)
+                    raise InvalidSymbolicMemoryAccess(address, 'r', size, crashing_condition)
 
 
                 #INCOMPLETE Result! We could also fork once for every map
@@ -908,7 +966,7 @@ class SMemory(Memory):
                     crashing_condition = Operators.OR(address == base, crashing_condition)
 
             if solver.can_be_true(self.constraints, crashing_condition):
-                raise SymbolicMemoryException('No access reading symbolic', address, size, crashing_condition)
+                raise InvalidSymbolicMemoryAccess(address, 'r', size, crashing_condition)
 
             condition = False
             for base in solutions:
@@ -960,7 +1018,7 @@ class SMemory(Memory):
                     crashing_condition = Operators.OR(address == base, crashing_condition)
 
             if solver.can_be_true(self.constraints, crashing_condition):
-                raise SymbolicMemoryException('No access writing symbolic', address, size, crashing_condition)
+                raise InvalidSymbolicMemoryAccess(address, 'w', size, crashing_condition)
 
             for offset in xrange(size):
                 for base in solutions:
@@ -972,7 +1030,7 @@ class SMemory(Memory):
             for offset in xrange(size):
                 if issymbolic(value[offset]):
                     if not self.access_ok(address+offset, 'w'):
-                        raise MemoryException('No access writing', address+offset)
+                        raise InvalidMemoryAccess(address+offset, 'w')
                     self._symbols[address+offset] = [(True, value[offset])]
                 else:
                     # overwrite all previous items

@@ -16,6 +16,7 @@ Manticore is a prototyping tool for dynamic binary analysis, with support for sy
 
 Manticore supports binaries of the following formats, operating systems, and
 architectures. It has been primarily used on binaries compiled from C and C++.
+Examples of practical manticore usage are also [on github](https://github.com/trailofbits/manticore-examples).
 
 - OS/Formats: Linux ELF, Windows Minidump
 - Architectures: x86, x86_64, ARMv7 (partial)
@@ -34,11 +35,10 @@ sudo apt-get update && sudo apt-get install z3 python-pip -y
 python -m pip install -U pip
 
 # Install manticore and its dependencies
-git clone https://github.com/trailofbits/manticore.git && cd manticore
-sudo pip install --no-binary capstone .
+sudo pip install manticore
 
-# Build the examples
-cd examples/linux
+# Download and build the examples
+git clone https://github.com/trailofbits/manticore.git && cd manticore/examples/linux
 make
 
 # Use the Manticore CLI
@@ -60,8 +60,7 @@ Option 1: Perform a user install (requires `~/.local/bin` in your `PATH`).
 ```
 echo "PATH=\$PATH:~/.local/bin" >> ~/.profile
 source ~/.profile
-git clone https://github.com/trailofbits/manticore.git && cd manticore
-pip install --user --no-binary capstone .
+pip install --user manticore
 ```
 
 Option 2: Use a virtual environment (requires [virtualenvwrapper](https://virtualenvwrapper.readthedocs.io/en/latest/) or [similar](https://virtualenv.pypa.io/en/stable/)).
@@ -70,16 +69,14 @@ Option 2: Use a virtual environment (requires [virtualenvwrapper](https://virtua
 pip install virtualenvwrapper
 echo "source /usr/local/bin/virtualenvwrapper.sh" >> ~/.profile
 source ~/.profile
-git clone https://github.com/trailofbits/manticore.git && cd manticore
 mkvirtualenv manticore
-pip install --no-binary capstone .
+pip install manticore
 ```
 
 Option 3: Perform a system install.
 
 ```
-git clone https://github.com/trailofbits/manticore.git && cd manticore
-sudo pip install --no-binary capstone .
+sudo pip install manticore
 ```
 
 Once installed, the `manticore` CLI tool and its Python API will be available.
@@ -89,7 +86,8 @@ Once installed, the `manticore` CLI tool and its Python API will be available.
 For a dev install that includes dependencies for tests, run:
 
 ```
-pip install --no-binary capstone --no-binary keystone-engine -e .[dev]
+git clone https://github.com/trailofbits/manticore.git && cd manticore
+pip install --no-binary keystone-engine -e .[dev]
 ```
 
 You can run the tests with the commands below:
@@ -104,6 +102,15 @@ nosetests tests/test_armv7cpu.py
 nosetests tests/test_armv7cpu.py:Armv7CpuInstructions
 # just one test
 nosetests tests/test_armv7cpu.py:Armv7CpuInstructions.test_mov_imm_min
+```
+
+Moreover, you can invoke multiprocess test invocation via the --processes
+flag. Note, however, that several tests (e.g., tests/test_memdumps.py) require
+longer execution times, thus you need to specify the appropriate timeout
+period via the --process-timeout flag. E.g.,
+
+```
+nosetests --processes=8 --process-timeout=120 tests/test_binaries.py
 ```
 
 ## Usage
@@ -133,5 +140,17 @@ def hook(state):
 m.run()
 ```
 
-See the [wiki](https://github.com/trailofbits/manticore/wiki), [examples](examples) directory, and [API reference](http://manticore.readthedocs.io/en/latest/) for further documentation.
+Further documentation is available in several places:
+
+  * The [wiki](https://github.com/trailofbits/manticore/wiki) contains some
+    basic information about getting started with manticore and contributing
+
+  * The [examples](examples) directory has some very minimal examples that
+    showcase API features
+
+  * The [manticore-examples](https://github.com/trailofbits/manticore-examples)
+    repository has some more involved examples, for instance solving real CTF problems
+
+  * The [API reference](http://manticore.readthedocs.io/en/latest/) has more
+    thorough and in-depth documentation on our API
 
