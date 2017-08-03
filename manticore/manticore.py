@@ -28,15 +28,15 @@ from .utils.nointerrupt import WithKeyboardInterruptAs
 logger = logging.getLogger('MANTICORE')
 
 
-def makeDecree(args):
+def makeDecree(program, concrete_data=''):
     constraints = ConstraintSet()
-    platform = decree.SDecree(constraints, ','.join(args.programs))
+    platform = decree.SDecree(constraints, program)
     initial_state = State(constraints, platform)
-    logger.info('Loading program %s', args.programs)
+    logger.info('Loading program %s', program)
 
-    #if args.data != '':
-    #    logger.info('Starting with concrete input: {}'.format(args.data))
-    platform.input.transmit(args.data)
+    if concrete_data != '':
+        logger.info('Starting with concrete input: {}'.format(concrete_data))
+    platform.input.transmit(concrete_data)
     platform.input.transmit(initial_state.symbolicate_buffer('+'*14, label='RECEIVE'))
     return initial_state
 
@@ -390,7 +390,7 @@ class Manticore(object):
             state = makeWindows(self._args)
         elif self._binary_type == 'DECREE':
             # Decree
-            state = makeDecree(self._args)
+            state = makeDecree(self._binary, self._concrete_data)
         else:
             raise NotImplementedError("Binary {} not supported.".format(path))
 
@@ -552,7 +552,7 @@ class Manticore(object):
 
     def _terminate_state_callback(self, state, state_id, ex):
         #aggregates state statistics into exceutor statistics. FIXME split
-        logger.debug("Terminate state %r %r ", state, state_id)
+        logger.info("Terminate state %r %r ", state, state_id)
         if state is None:
             return
         state_visited = state.context.get('visited_since_last_fork', set())
@@ -571,9 +571,10 @@ class Manticore(object):
             manticore_context['visited'] = manticore_visited.union(state_visited)
         state.context['visited_since_last_fork'] = set()
 
-        logger.debug("About to store state %r %r %r", state, expression, values, policy)
+        logger.info("Forking, about to store. (policy: %s, values: %s)", policy,
+                ', '.join('0x{:x}'.format(pc) for pc in values))
 
-    def _read_register_callback(self, state, reg_name, value):
+    def _read_register_callback(self, state, reg_name, value): 
         logger.debug("Read Register %r %r", reg_name, value)
 
     def _write_register_callback(self, state, reg_name, value):
@@ -585,9 +586,8 @@ class Manticore(object):
     def _write_memory_callback(self, state, address, value, size):
         logger.debug("Write Memory %r %r %r", address, value, size)
 
-    def _decode_instruction_callback(self, state):
+    def _decode_instruction_callback(self, state, pc):
         logger.debug("Decoding stuff instruction not available")
-
 
     def _emulate_instruction_callback(self, state, instruction):
         logger.debug("About to emulate instruction")
@@ -707,36 +707,31 @@ class Manticore(object):
         self._executor = Executor(initial_state,
                                   workspace=ws_path,
                                   policy=self._policy, 
-                                  dumpafter=self.dumpafter, 
-                                  maxstates=self.maxstates,
-                                  maxstorage=self.maxstorage,
-                                  replay=replay,
-                                  dumpstats=self.should_profile,
                                   context=self.context)
         
 
 
         #Link Executor events to default callbacks in manticore object
-        self._executor.did_read_register += self._read_register_callback
-        self._executor.will_write_register += self._write_register_callback
-        self._executor.did_read_memory += self._read_memory_callback
-        self._executor.will_write_memory += self._write_memory_callback
-        self._executor.will_execute_instruction += self._execute_instruction_callback
-        self._executor.will_decode_instruction += self._decode_instruction_callback
-        self._executor.will_store_state += self._store_state_callback
-        self._executor.will_load_state += self._load_state_callback
-        self._executor.will_fork_state += self._fork_state_callback
-        self._executor.will_terminate_state += self._terminate_state_callback
-        self._executor.will_generate_testcase += self._generate_testcase_callback
+        self._executor.subscribe('did_read_register', self._read_register_callback)
+        self._executor.subscribe('will_write_register', self._write_register_callback)
+        self._executor.subscribe('did_read_memory', self._read_memory_callback)
+        self._executor.subscribe('will_write_memory', self._write_memory_callback)
+        self._executor.subscribe('will_execute_instruction', self._execute_instruction_callback)
+        self._executor.subscribe('will_decode_instruction', self._decode_instruction_callback)
+        self._executor.subscribe('will_store_state', self._store_state_callback)
+        self._executor.subscribe('will_load_state', self._load_state_callback)
+        self._executor.subscribe('will_fork_state', self._fork_state_callback)
+        self._executor.subscribe('will_terminate_state', self._terminate_state_callback)
+        self._executor.subscribe('will_generate_testcase', self._generate_testcase_callback)
 
         if self._hooks:
-            self._executor.will_execute_instruction += self._hook_callback
+            self._executor.subscribe('will_execute_instruction', self._hook_callback)
 
         if self._model_hooks:
-            self._executor.will_execute_instruction += self._model_hook_callback
+            self._executor.subscribe('will_execute_instruction', self._model_hook_callback)
 
         if self._assertions:
-            self._executor.will_execute_instruction += self._assertions_callback
+            self._executor.subscribe('will_execute_instruction', self._assertions_callback)
 
         self._time_started = time.time()
 
@@ -755,8 +750,8 @@ class Manticore(object):
                 t.cancel()
         #Copy back the shared conext
         self._context = dict(self._executor._shared_context)
-        self.finish_run()
         self._executor = None
+        self.finish_run()
 
 
     def terminate(self):

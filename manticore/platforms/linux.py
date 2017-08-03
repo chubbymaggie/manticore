@@ -8,8 +8,6 @@ import ctypes
 
 #Remove in favor of binary.py
 from elftools.elf.elffile import ELFFile
-
-from ..utils.event import Signal, forward_signals
 from ..utils.helpers import issymbolic
 from ..core.cpu.abstractcpu import Interruption, Syscall, ConcretizeArgument
 from ..core.cpu.cpufactory import CpuFactory
@@ -113,7 +111,7 @@ class SymbolicFile(File):
         :param constraints: the SMT constraints
         :param str path: the pathname of the symbolic file
         :param str mode: the access permissions of the symbolic file
-        :param max_size: Maximun amount of bytes of the symbolic file
+        :param max_size: Maximum amount of bytes of the symbolic file
         :param str wildcard: Wildcard to be used in symbolic file
         '''
         super(SymbolicFile, self).__init__(path, mode)
@@ -170,14 +168,30 @@ class SymbolicFile(File):
         '''
         return self.pos
 
-    def seek(self, pos):
+    def seek(self, offset, whence = os.SEEK_SET):
         '''
-        Returns the read/write file offset
+        Repositions the file C{offset} according to C{whence}.
+        Returns the resulting offset or -1 in case of error.
         :rtype: int
-        :return: the read/write file offset.
+        :return: the file offset.
         '''
-        assert isinstance(pos, (int, long))
-        self.pos = pos
+        assert isinstance(offset, (int, long))
+        assert whence in (os.SEEK_SET, os.SEEK_CUR, os.SEEK_END)
+
+        new_position = 0
+        if whence == os.SEEK_SET:
+            new_position = offset
+        elif whence == os.SEEK_CUR:
+            new_position = self.pos + offset
+        elif whence == os.SEEK_END:
+            new_position = self.max_size + offset
+
+        if new_position < 0:
+            return -1
+
+        self.pos = new_position
+
+        return self.pos
 
     def read(self, count):
         '''
@@ -268,7 +282,7 @@ class Linux(Platform):
     This class emulates the most common Linux system calls
     '''
 
-    def __init__(self, program, argv=None, envp=None):
+    def __init__(self, program, argv=None, envp=None, **kwargs):
         '''
         Builds a Linux OS platform
         :param string program: The path to ELF binary
@@ -277,7 +291,7 @@ class Linux(Platform):
         :ivar files: List of active file descriptors
         :type files: list[Socket] or list[File]
         '''
-        super(Linux, self).__init__(program)
+        super(Linux, self).__init__(path=program, **kwargs)
 
         self.program = program
         self.clocks = 0
@@ -366,7 +380,7 @@ class Linux(Platform):
 
         #Install event forwarders
         for proc in self.procs:
-            forward_signals(self, proc)
+            self.forward_events_from(proc)
 
     def _mk_proc(self, arch):
         if arch in {'i386', 'armv7'}:
@@ -380,7 +394,7 @@ class Linux(Platform):
         return self.procs[self._current]
 
     def __getstate__(self):
-        state = {}
+        state = super(Linux, self).__getstate__()
         state['clocks'] = self.clocks
         state['input'] = self.input.buffer
         state['output'] = self.output.buffer
@@ -421,6 +435,8 @@ class Linux(Platform):
         :todo: some asserts
         :todo: fix deps? (last line)
         """
+        super(Linux, self).__setstate__(state)
+
         self.input = Socket()
         self.input.buffer = state['input']
         self.output = Socket()
@@ -465,7 +481,7 @@ class Linux(Platform):
             
         #Install event forwarders
         for proc in self.procs:
-            forward_signals(self, proc)
+            self.forward_events_from(proc)
 
     def _init_arm_kernel_helpers(self):
         '''
