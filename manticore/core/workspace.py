@@ -16,7 +16,7 @@ from multiprocessing.managers import SyncManager
 from .smtlib import solver
 from .smtlib.solver import SolverException
 
-logger = logging.getLogger('WORKSPACE')
+logger = logging.getLogger(__name__)
 
 manager = SyncManager()
 manager.start(lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
@@ -161,6 +161,10 @@ class Store(object):
         """
         with self.load_stream(key) as f:
             state = self._serializer.deserialize(f)
+            # FIXME (theo) remove this from here and properly handle
+            # serialization for the platform CPU
+            if hasattr(state.cpu, "platform_cpu"):
+                state.cpu.platform_cpu._memory = state.cpu._memory
             self.rm(key)
             return state
 
@@ -247,7 +251,7 @@ class MemoryStore(Store):
     """
     An in-memory (dict) Manticore workspace.
 
-    NOTE: This is mostly used for experimentation and testing funcionality. 
+    NOTE: This is mostly used for experimentation and testing funcionality.
     Can not be used with multiple workers!
     """
     store_type = 'mem'
@@ -522,18 +526,24 @@ class ManticoreOutput(object):
             f.write(repr(state.platform.syscall_trace))
 
     def save_fds(self, state):
+        def solve_to_fd(data, fd):
+            try:
+                for c in data:
+                    fd.write(chr(solver.get_value(state.constraints, c)))
+            except SolverException:
+                fd.write('{SolverException}')
+
         with self._named_stream('stdout') as _out:
-            with self._named_stream('stdout') as _err:
+            with self._named_stream('stderr') as _err:
                 with self._named_stream('stdin') as _in:
-                    for name, fd, data in state.platform.syscall_trace:
-                        if name in ('_transmit', '_write'):
-                            if fd == 1:
-                                _out.write(''.join(str(c) for c in data))
-                            elif fd == 2:
-                                _err.write(''.join(str(c) for c in data))
-                        if name in ('_receive', '_read') and fd == 0:
-                            try:
-                                for c in data:
-                                    _in.write(chr(solver.get_value(state.constraints, c)))
-                            except SolverException:
-                                _in.write('{SolverException}')
+                    with self._named_stream('net') as _net:
+                        for name, fd, data in state.platform.syscall_trace:
+                            if name in ('_transmit', '_write'):
+                                if fd == 1:
+                                    solve_to_fd(data, _out)
+                                elif fd == 2:
+                                    solve_to_fd(data, _err)
+                            if name in ('_recv'):
+                                solve_to_fd(data, _net)
+                            if name in ('_receive', '_read') and fd == 0:
+                                solve_to_fd(data, _in)
