@@ -1,12 +1,32 @@
 import logging
+
+from capstone import CS_GRP_JUMP
+
 from ..utils.helpers import issymbolic
-from ..utils.event import Eventful
-logger = logging.getLogger('MANTICORE')
+logger = logging.getLogger(__name__)
 
 
 class Plugin(object):
     def __init__(self): 
         self.manticore = None
+        self.last_reg_state = {}
+
+def _dict_diff(d1, d2):
+    '''
+    Produce a dict that includes all the keys in d2 that represent different values in d1, as well as values that
+    aren't in d1.
+
+    :param dict d1: First dict
+    :param dict d2: Dict to compare with
+    :rtype: dict
+    '''
+    d = {}
+    for key in set(d1).intersection(set(d2)):
+        if d2[key] != d1[key]:
+            d[key] = d2[key]
+    for key in set(d2).difference(set(d1)):
+        d[key] = d2[key]
+    return d
 
 class Tracer(Plugin):
     def will_start_run_callback(self, state):
@@ -14,6 +34,110 @@ class Tracer(Plugin):
 
     def did_execute_instruction_callback(self, state, pc, target_pc, instruction):
         state.context['trace'].append(pc)
+
+class ExtendedTracer(Plugin):
+    def __init__(self):
+        '''
+        Record a detailed execution trace
+        '''
+        super(ExtendedTracer, self).__init__()
+        self.last_dict = {}
+        self.current_pc = None
+        self.context_key = 'e_trace'
+
+    def will_start_run_callback(self, state):
+        state.context[self.context_key] = []
+
+    def register_state_to_dict(self, cpu):
+        d = {}
+        for reg in cpu.canonical_registers:
+            val = cpu.read_register(reg)
+            d[reg] = val if not issymbolic(val) else '<sym>'
+        return d
+
+    def will_execute_instruction_callback(self, state, pc, instruction):
+        self.current_pc = pc
+
+    def did_execute_instruction_callback(self, state, pc, target_pc, instruction):
+        reg_state = self.register_state_to_dict(state.cpu)
+        entry = {
+            'type': 'regs',
+            'values': _dict_diff(self.last_dict, reg_state)
+        }
+        self.last_dict = reg_state
+        state.context[self.context_key].append(entry)
+
+    def will_read_memory_callback(self, state, where, size):
+        if self.current_pc == where:
+            return
+
+        #print 'will_read_memory %x %r, current_pc %x'%(where, size, self.current_pc)
+
+    def did_read_memory_callback(self, state, where, value, size):
+        if self.current_pc == where:
+            return
+
+        #print 'did_read_memory %x %r %r, current_pc %x'%(where, value, size, self.current_pc)
+
+    def will_write_memory_callback(self, state, where, value, size):
+        if self.current_pc == where:
+            return
+
+        #print 'will_write_memory %x %r %r, current_pc %x'%(where, value, size, self.current_pc)
+
+    def did_write_memory_callback(self, state, where, value, size):
+        if self.current_pc == where:
+            raise Exception
+            return
+
+        entry = {
+            'type': 'mem_write',
+            'where': where,
+            'value': value,
+            'size': size
+        }
+        state.context[self.context_key].append(entry)
+
+class Follower(Plugin):
+    def __init__(self, trace):
+        self.index = 0
+        self.trace = trace
+        self.last_instruction = None
+        self.symbolic_ranges = []
+        self.active = True
+        super(self.__class__, self).__init__()
+
+    def add_symbolic_range(self, pc_start, pc_end):
+        self.symbolic_ranges.append((pc_start,pc_end))
+
+    def get_next(self, type):
+        event = self.trace[self.index]
+        assert event['type'] == type
+        self.index += 1
+        return event
+
+    def did_write_memory_callback(self, state, where, value, size):
+        if not self.active:
+            return
+        write = self.get_next('mem_write')
+
+        if not issymbolic(value):
+            return
+
+        assert write['where'] == where and write['size'] == size
+        # state.constrain(value == write['value'])
+
+    def did_execute_instruction_callback(self, state, last_pc, pc, insn):
+        if not self.active:
+            return
+        event = self.get_next('regs')
+        self.last_instruction = event['values']
+        if issymbolic(pc):
+            state.constrain(state.cpu.RIP == self.last_instruction['RIP'])
+        else:
+            for start, stop in self.symbolic_ranges:
+                if start <= pc <= stop:
+                    self.active = False
 
 class RecordSymbolicBranches(Plugin):
     def will_start_run_callback(self, state):
@@ -90,7 +214,34 @@ class Visited(Plugin):
                     f.write(fmt.format(m))
         logger.info('Coverage: %d different instructions executed', len(executor_visited))
 
+class ConcreteTraceFollower(Plugin):
+    def __init__(self, source=None):
+        '''
+        :param iterable source: Iterator producing instruction pointers to be followed
+        '''
+        super(ConcreteTraceFollower, self).__init__()
+        self.source = source
 
+    def will_start_run_callback(self, state):
+        self.saved_flags = None
+
+    def will_execute_instruction_callback(self, state, pc, instruction):
+        if not instruction.group(CS_GRP_JUMP):
+            self.saved_flags = None
+            return
+
+        # Likely unconditional
+        if not instruction.regs_read:
+            self.saved_flags = None
+            return
+
+        self.saved_flags = state.cpu.RFLAGS
+        state.cpu.RFLAGS = state.new_symbolic_value(state.cpu.address_bit_size)
+
+    def did_execute_instruction_callback(self, state, pc, target_pc, instruction):
+        # Should direct execution via trace
+        if self.saved_flags:
+            state.cpu.RFLAGS = self.saved_flags
 
 #TODO document all callbacks
 class ExamplePlugin(Plugin):
