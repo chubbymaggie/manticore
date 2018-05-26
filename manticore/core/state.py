@@ -1,8 +1,5 @@
-import os
 import copy
 import logging
-from collections import OrderedDict
-from weakref import WeakSet
 
 from .smtlib import solver, Bool, ArrayProxy, Array
 from ..utils.helpers import issymbolic
@@ -15,13 +12,14 @@ from ..platforms.platform import *
 
 logger = logging.getLogger(__name__)
 
+
 class StateException(Exception):
     ''' All state related exceptions '''
-    pass
 
 
 class TerminateState(StateException):
     ''' Terminates current state exploration '''
+
     def __init__(self, message, testcase=False):
         super(TerminateState, self).__init__(message)
         self.testcase = testcase
@@ -37,12 +35,14 @@ class Concretize(StateException):
 
     '''
     _ValidPolicies = ['MINMAX', 'ALL', 'SAMPLED', 'ONE']
-    def __init__(self, message, expression, setstate=None, policy='ALL',  **kwargs):
-        assert policy in self._ValidPolicies, "Policy must be one of: %s"%(', '.join(self._ValidPolicies),)
+
+    def __init__(self, message, expression, setstate=None, policy='ALL', **kwargs):
+        if policy not in self._ValidPolicies:
+            raise Exception("Policy (%s) must be one of: %s" % (policy, ', '.join(self._ValidPolicies),))
         self.expression = expression
         self.setstate = setstate
         self.policy = policy
-        self.message = "Concretize: %s (Policy: %s)"%(message, policy)
+        self.message = "Concretize: %s (Policy: %s)" % (message, policy)
         super(Concretize, self).__init__(**kwargs)
 
 
@@ -54,6 +54,7 @@ class ForkState(Concretize):
         to the state. So the expression could still by symbolic(but constrained)
         in forked states.
     '''
+
     def __init__(self, message, expression, **kwargs):
         assert isinstance(expression, Bool), 'Need a Bool to fork a state in two states'
         super(ForkState, self).__init__(message, expression, policy='ALL', **kwargs)
@@ -79,11 +80,11 @@ class State(Eventful):
         self._input_symbols = list()
         self._child = None
         self._context = dict()
-        ##################################################################33
+        # 33
         # Events are lost in serialization and fork !!
         self.forward_events_from(platform)
-        
-        #FIXME(felipe) This should go into some event callback in a plugin (start_run?)
+
+        # FIXME(felipe) This should go into some event callback in a plugin (start_run?)
         self._init_context()
 
     def __getstate__(self):
@@ -102,11 +103,11 @@ class State(Eventful):
         self._input_symbols = state['input_symbols']
         self._child = state['child']
         self._context = state['context']
-        ##################################################################33
+        # 33
         # Events are lost in serialization and fork !!
         self.forward_events_from(self._platform)
 
-    #Fixme(felipe) change for with "state.cow_copy() as st_temp":.
+    # Fixme(felipe) change for with "state.cow_copy() as st_temp":.
     def __enter__(self):
         assert self._child is None
         new_state = State(self._constraints.__enter__(), self._platform)
@@ -114,7 +115,7 @@ class State(Eventful):
         new_state._context = copy.deepcopy(self._context)
         self._child = new_state
 
-        #fixme NEW State won't inherit signals (pro: added signals to new_state wont affect parent)
+        # fixme NEW State won't inherit signals (pro: added signals to new_state wont affect parent)
         return new_state
 
     def __exit__(self, ty, value, traceback):
@@ -125,29 +126,31 @@ class State(Eventful):
         try:
             result = self._platform.execute()
 
-        #Instead of State importing SymbolicRegisterException and SymbolicMemoryException
+        # Instead of State importing SymbolicRegisterException and SymbolicMemoryException
         # from cpu/memory shouldn't we import Concretize from linux, cpu, memory ??
         # We are forcing State to have abstractcpu
         except ConcretizeRegister as e:
             expression = self.cpu.read_register(e.reg_name)
+
             def setstate(state, value):
                 state.cpu.write_register(e.reg_name, value)
             raise Concretize(e.message,
-                                expression=expression,
-                                setstate=setstate,
-                                policy=e.policy)
+                             expression=expression,
+                             setstate=setstate,
+                             policy=e.policy)
         except ConcretizeMemory as e:
             expression = self.cpu.read_int(e.address, e.size)
+
             def setstate(state, value):
                 state.cpu.write_int(e.address, value, e.size)
             raise Concretize(e.message,
-                                expression=expression,
-                                setstate=setstate,
-                                policy=e.policy)
+                             expression=expression,
+                             setstate=setstate,
+                             policy=e.policy)
         except MemoryException as e:
             raise TerminateState(e.message, testcase=True)
 
-        #Remove when code gets stable?
+        # Remove when code gets stable?
         assert self.platform.constraints is self.constraints
         return result
 
@@ -194,7 +197,7 @@ class State(Eventful):
         :param int nbytes: Length of the new buffer
         :param str label: (keyword arg only) The label to assign to the buffer
         :param bool cstring: (keyword arg only) Whether or not to enforce that the buffer is a cstring
-                 (i.e. no \0 bytes, except for the last byte). (bool)
+                 (i.e. no NULL bytes, except for the last byte). (bool)
         :param taint: Taint identifier of the new buffer
         :type taint: tuple or frozenset
 
@@ -202,7 +205,7 @@ class State(Eventful):
         '''
         label = options.get('label', 'buffer')
         taint = options.get('taint', frozenset())
-        expr = self._constraints.new_array(name=label, index_max=nbytes, taint=taint)
+        expr = self._constraints.new_array(name=label, index_max=nbytes, value_bits=8, taint=taint)
         self._input_symbols.append(expr)
 
         if options.get('cstring', False):
@@ -234,7 +237,7 @@ class State(Eventful):
                 this is the identity function on the first argument.
         :param str label: The label to assign to the value
         :param str wildcard: The byte that is considered a wildcard
-        :param bool string: Ensure bytes returned can not be \0
+        :param bool string: Ensure bytes returned can not be NULL
         :param taint: Taint identifier of the symbolicated data
         :type taint: tuple or frozenset
 
@@ -264,13 +267,11 @@ class State(Eventful):
                     assert b != 0
         return data
 
-    def concretize(self, symbolic, policy, maxcount=1000):
+    def concretize(self, symbolic, policy, maxcount=5):
         ''' This finds a set of solutions for symbolic using policy.
             This raises TooManySolutions if more solutions than maxcount
         '''
         assert self.constraints == self.platform.constraints
-
-
         vals = []
         if policy == 'MINMAX':
             vals = self._solver.minmax(self._constraints, symbolic)
@@ -290,16 +291,18 @@ class State(Eventful):
             vals = solver.get_all_values(self._constraints, symbolic, maxcnt=maxcount,
                                          silent=False)
 
-        return list(set(vals))
+        return tuple(set(vals))
 
     @property
     def _solver(self):
         from .smtlib import solver
         return solver
 
-
     def can_be_true(self, expr):
         return self._solver.can_be_true(self._constraints, expr)
+
+    def must_be_true(self, expr):
+        return not self._solver.can_be_true(self._constraints, expr == False)
 
     def solve_one(self, expr):
         '''
@@ -310,7 +313,18 @@ class State(Eventful):
         :return: Concrete value
         :rtype: int
         '''
-        return self._solver.get_value(self._constraints, expr)
+        value = self._solver.get_value(self._constraints, expr)
+        #Include forgiveness here
+        if isinstance(value, tuple):
+            try:
+                return ''.join(map(chr, value))
+            except:
+                pass
+            try:
+                return ''.join(value)
+            except:
+                pass
+        return value
 
     def solve_n(self, expr, nsolves):
         '''
@@ -322,6 +336,32 @@ class State(Eventful):
         :rtype: list[int]
         '''
         return self._solver.get_all_values(self._constraints, expr, nsolves, silent=True)
+
+    def solve_max(self, expr):
+        '''
+        Solves a symbolic :class:`~manticore.core.smtlib.expression.Expression` into
+        its maximun solution
+
+        :param manticore.core.smtlib.Expression expr: Symbolic value to solve
+        :return: Concrete value
+        :rtype: list[int]
+        '''
+        if isinstance(expr, (int, long)):
+            return expr
+        return self._solver.max(self._constraints, expr)
+
+    def solve_min(self, expr):
+        '''
+        Solves a symbolic :class:`~manticore.core.smtlib.expression.Expression` into
+        its minimun solution
+
+        :param manticore.core.smtlib.Expression expr: Symbolic value to solve
+        :return: Concrete value
+        :rtype: list[int]
+        '''
+        if isinstance(expr, (int, long)):
+            return expr
+        return self._solver.min(self._constraints, expr)
 
     def solve_buffer(self, addr, nbytes):
         '''
@@ -356,7 +396,7 @@ class State(Eventful):
         self._platform.invoke_model(model, prefix_args=(self,))
 
     ################################################################################################
-    #The following should be moved to specific class StatePosix?
+    # The following should be moved to specific class StatePosix?
     @property
     def cpu(self):
         return self._platform.current
@@ -365,11 +405,11 @@ class State(Eventful):
     def mem(self):
         return self._platform.current.memory
 
-    #FIXME(felipe) Remove this
+    # FIXME(felipe) Remove this
     def _init_context(self):
         self.context['branches'] = dict()
 
-    #FIXME(felipe) Remove this
+    # FIXME(felipe) Remove this
     def record_branch(self, target):
         branches = self.context['branches']
         branch = (self.cpu._last_pc, target)
