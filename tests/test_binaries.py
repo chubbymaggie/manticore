@@ -1,4 +1,4 @@
-import StringIO
+import io
 import unittest
 import sys
 import shutil
@@ -7,10 +7,38 @@ import os
 import hashlib
 import subprocess
 import time
+from manticore.binary import Elf, CGCElf
 
 #logging.basicConfig(filename = "test.log",
 #                format = "%(asctime)s: %(name)s:%(levelname)s: %(message)s",
 #                level = logging.DEBUG)
+
+
+class TestBinaryPackage(unittest.TestCase):
+    _multiprocess_can_split_ = True
+
+    def test_elf(self):
+        filename = os.path.join(os.path.dirname(__file__), 'binaries', 'basic_linux_amd64')
+        f = Elf(filename)
+        self.assertTrue(
+            [(4194304, 823262, 'r x', 'tests/binaries/basic_linux_amd64', 0, 823262),
+             (7118520, 16112, 'rw ', 'tests/binaries/basic_linux_amd64', 827064, 7320)],
+            list(f.maps())
+        )
+        self.assertTrue([('Running', {'EIP': 4196624})], list(f.threads()))
+        self.assertIsNone(f.getInterpreter())
+        f.elf.stream.close()
+
+    def test_decree(self):
+        filename = os.path.join(os.path.dirname(__file__), 'binaries', 'cadet_decree_x86')
+        f = CGCElf(filename)
+        self.assertTrue(
+            [(134512640, 1478, 'r x', 'tests/binaries/cadet_decree_x86', 0, 1478)],
+            list(f.maps())
+        )
+        self.assertTrue([('Running', {'EIP': 134513708})], list(f.threads()))
+        f.elf.stream.close()
+
 
 class IntegrationTest(unittest.TestCase):
     _multiprocess_can_split_ = True
@@ -25,9 +53,10 @@ class IntegrationTest(unittest.TestCase):
     def _loadVisitedSet(self, visited):
 
         self.assertTrue(os.path.exists(visited))
-        vitems = open(visited, 'r').read().splitlines()
+        with open(visited, 'r') as f:
+            vitems = f.read().splitlines()
 
-        vitems = map(lambda x: int(x[2:], 16), vitems)
+        vitems = [int(x[2:], 16) for x in vitems]
 
         return set(vitems)
 
@@ -100,7 +129,7 @@ class IntegrationTest(unittest.TestCase):
 
         for line in testcase_info:
             self.assertIn('Generated testcase', line)
-
+    @unittest.skip('sloowww')
     def testArgumentsAssertions(self):
         dirname = os.path.dirname(__file__)
         filename = os.path.abspath(os.path.join(dirname, 'binaries', 'arguments_linux_amd64'))
@@ -108,7 +137,8 @@ class IntegrationTest(unittest.TestCase):
         filename = filename[len(os.getcwd())+1:]
         workspace = os.path.join(self.test_dir, 'workspace')
         assertions = os.path.join(self.test_dir, 'assertions.txt')
-        file(assertions,'w').write('0x0000000000401003 ZF == 1')
+        with open(assertions, 'w') as output:
+            output.write('0x0000000000401003 ZF == 1')
         with open(os.path.join(os.pardir, self.test_dir, 'output.log'), "w") as output:
             subprocess.check_call(['python', '-m', 'manticore',
                                    '--workspace', workspace,
@@ -152,7 +182,7 @@ class IntegrationTest(unittest.TestCase):
         ]
 
         for issue in issues:
-            self._simple_cli_run('{}.sol'.format(issue['number']),
+            self._simple_cli_run(f'{issue["number"]}.sol',
                                  contract=issue['contract'], tx_limit=issue['txlimit'])
 
     def test_eth_705(self):
@@ -168,7 +198,7 @@ class IntegrationTest(unittest.TestCase):
     def test_basic_arm(self):
         dirname = os.path.dirname(__file__)
         filename = os.path.abspath(os.path.join(dirname, 'binaries', 'basic_linux_armv7'))
-        workspace = os.path.join(self.test_dir,'workspace') 
+        workspace = os.path.join(self.test_dir, 'workspace')
         output = subprocess.check_output(['python', '-m', 'manticore', '--workspace', workspace, filename])
 
         with open(os.path.join(workspace, "test_00000000.stdout")) as f:
@@ -206,7 +236,7 @@ class IntegrationTest(unittest.TestCase):
         """
         dirname = os.path.dirname(__file__)
         filename = os.path.abspath(os.path.join(dirname, 'binaries/brk_static_amd64'))
-        workspace = '%s/workspace' % self.test_dir
+        workspace = f'{self.test_dir}/workspace'
         output = subprocess.check_output(['python', '-m', 'manticore', '--workspace', workspace, filename])
 
         with open(os.path.join(workspace, "test_00000000.messages")) as f:

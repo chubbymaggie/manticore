@@ -1,14 +1,15 @@
 import logging
-import re
+from contextlib import contextmanager
+from typing import Optional
+
 from capstone import CS_GRP_JUMP
 
 from ..utils.helpers import issymbolic
-from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 
-class Plugin(object):
+class Plugin:
     @contextmanager
     def locked_context(self, key=None, value_type=list):
         """
@@ -35,6 +36,14 @@ class Plugin(object):
     def __init__(self):
         self.manticore = None
         self.last_reg_state = {}
+
+    def on_register(self):
+        ''' Called by parent manticore on registration '''
+        pass
+
+    def on_unregister(self):
+        ''' Called be parent manticore on un-registration '''
+        pass
 
 
 def _dict_diff(d1, d2):
@@ -65,7 +74,7 @@ class ExtendedTracer(Plugin):
         '''
         Record a detailed execution trace
         '''
-        super(ExtendedTracer, self).__init__()
+        super().__init__()
         self.last_dict = {}
         self.current_pc = None
         self.context_key = 'e_trace'
@@ -93,19 +102,19 @@ class ExtendedTracer(Plugin):
         if self.current_pc == where:
             return
 
-        #print 'will_read_memory %x %r, current_pc %x'%(where, size, self.current_pc)
+        # print(f'will_read_memory {where:x} {size!r}, current_pc {self.current_pc:x}')
 
     def did_read_memory_callback(self, state, where, value, size):
         if self.current_pc == where:
             return
 
-        #print 'did_read_memory %x %r %r, current_pc %x'%(where, value, size, self.current_pc)
+        # print(f'did_read_memory {where:x} {value!r} {size!r}, current_pc {self.current_pc:x}')
 
     def will_write_memory_callback(self, state, where, value, size):
         if self.current_pc == where:
             return
 
-        #print 'will_write_memory %x %r %r, current_pc %x'%(where, value, size, self.current_pc)
+        # print(f'will_write_memory {where:x} {value!r} {size!r}, current_pc {self.current_pc:x}')
 
     def did_write_memory_callback(self, state, where, value, size):
         if self.current_pc == where:
@@ -128,7 +137,7 @@ class Follower(Plugin):
         self.last_instruction = None
         self.symbolic_ranges = []
         self.active = True
-        super(self.__class__, self).__init__()
+        super().__init__()
 
     def add_symbolic_range(self, pc_start, pc_end):
         self.symbolic_ranges.append((pc_start, pc_end))
@@ -203,7 +212,7 @@ class InstructionCounter(Plugin):
 
 class Visited(Plugin):
     def __init__(self, coverage_file='visited.txt'):
-        super(Visited, self).__init__()
+        super().__init__()
         self.coverage_file = coverage_file
 
     def will_terminate_state_callback(self, state, state_id, ex):
@@ -231,9 +240,8 @@ class Visited(Plugin):
         # Fixme this is duplicated?
         if self.coverage_file is not None:
             with self.manticore._output.save_stream(self.coverage_file) as f:
-                fmt = "0x{:016x}\n"
                 for m in executor_visited:
-                    f.write(fmt.format(m))
+                    f.write(f"0x{m:016x}\n")
         logger.info('Coverage: %d different instructions executed', len(executor_visited))
 
 
@@ -242,7 +250,7 @@ class ConcreteTraceFollower(Plugin):
         '''
         :param iterable source: Iterator producing instruction pointers to be followed
         '''
-        super(ConcreteTraceFollower, self).__init__()
+        super().__init__()
         self.source = source
 
     def will_start_run_callback(self, state):
@@ -267,112 +275,31 @@ class ConcreteTraceFollower(Plugin):
             state.cpu.RFLAGS = self.saved_flags
 
 
-class FilterFunctions(Plugin):
-    def __init__(self, regexp=r'.*', mutability='both', depth='both', fallback=False, include=True, **kwargs):
-        """
-            Constrain input based on function metadata. Include or avoid functions selected by the specified criteria.
-
-            Examples:
-            #Do not explore any human transactions that end up calling a constant function
-            no_human_constant = FilterFunctions(depth='human', mutability='constant', include=False)
-
-            #At human tx depth only accept synthetic check functions
-            only_tests = FilterFunctions(regexp=r'mcore_.*', depth='human', include=False)
-
-            :param regexp: a regular expresion over the name of the function '.*' will match all functions
-            :param mutability: mutable, constant or both will match functions declared in the abi to be of such class
-            :param depth: match functions in internal transactions, in human initiated transactions or in both types
-            :param fallback: if True include the fallback function. Hash will be 00000000 for it
-            :param include: if False exclude the selected functions, if True include them
-        """
-        super(FilterFunctions, self).__init__(**kwargs)
-        depth = depth.lower()
-        if depth not in ('human', 'internal', 'both'):
-            raise ValueError
-        mutability = mutability.lower()
-        if mutability not in ('mutable', 'constant', 'both'):
-            raise ValueError
-
-        #fixme better names for member variables
-        self._regexp = regexp
-        self._mutability = mutability
-        self._depth = depth
-        self._fallback = fallback
-        self._include = include
-
-    def will_open_transaction_callback(self, state, tx):
-        world = state.platform
-        tx_cnt = len(world.all_transactions)
-        # Constrain input only once per tx, per plugin
-        if state.context.get('constrained%d' % id(self), 0) != tx_cnt:
-            state.context['constrained%d' % id(self)] = tx_cnt
-
-            if self._depth == 'human' and not tx.is_human:
-                return
-            if self._depth == 'internal' and tx.is_human:
-                return
-
-            #Get metadata if any for the targe addreess of current tx
-            md = self.manticore.get_metadata(tx.address)
-            if md is None:
-                return
-            #Lets compile  the list of interesting hashes
-            selected_functions = []
-
-            for func_hsh in md.hashes:
-                if func_hsh == '00000000':
-                    continue
-                abi = md.get_abi(func_hsh)
-                func_name = md.get_func_name(func_hsh)
-                if self._mutability == 'constant' and not abi.get('constant', False):
-                    continue
-                if self._mutability == 'mutable' and abi.get('constant', False):
-                    continue
-                if not re.match(self._regexp, func_name):
-                    continue
-                selected_functions.append(func_hsh)
-
-            if self._fallback:
-                selected_functions.append('00000000')
-
-            if self._include:
-                # constraint the input so it can take only the interesting values
-                from manticore.core.smtlib import Operators
-                constraint = reduce(Operators.OR, map(lambda x: tx.data[:4] == x.decode('hex'), selected_functions))
-                state.constrain(constraint)
-            else:
-                #Avoid all not seleted hashes
-                for func_hsh in md.hashes:
-                    if func_hsh in selected_functions:
-                        constraint = tx.data[:4] != func_hsh.decode('hex')
-                        state.constrain(constraint)
-
-
 # TODO document all callbacks
-
-
 class ExamplePlugin(Plugin):
+    def will_open_transaction_callback(self, state, tx):
+        logger.info('will open a transaction %r %r', state, tx)
+
+    def will_close_transaction_callback(self, state, tx):
+        logger.info('will close a transaction %r %r', state, tx)
+
     def will_decode_instruction_callback(self, state, pc):
-        logger.info('will_decode_instruction', state, pc)
+        logger.info('will_decode_instruction %r %r', state, pc)
 
     def will_execute_instruction_callback(self, state, pc, instruction):
-        logger.info('will_execute_instruction', state, pc, instruction)
+        logger.info('will_execute_instruction %r %r %r', state, pc, instruction)
 
     def did_execute_instruction_callback(self, state, pc, target_pc, instruction):
-        logger.info('did_execute_instruction', state, pc, target_pc, instruction)
+        logger.info('did_execute_instruction %r %r %r %r', state, pc, target_pc, instruction)
 
     def will_start_run_callback(self, state):
-        ''' Called once at the begining of the run.
+        ''' Called once at the beginning of the run.
             state is the initial root state
         '''
         logger.info('will_start_run')
 
     def did_finish_run_callback(self):
         logger.info('did_finish_run')
-
-    def did_enqueue_state_callback(self, state_id, state):
-        ''' state was just got enqueued in the executor procesing list'''
-        logger.info('did_enqueue_state %r %r', state_id, state)
 
     def will_fork_state_callback(self, parent_state, expression, solutions, policy):
         logger.info('will_fork_state %r %r %r %r', parent_state, expression, solutions, policy)

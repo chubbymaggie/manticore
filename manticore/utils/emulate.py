@@ -1,6 +1,6 @@
 import logging
 
-from ..core.memory import MemoryException, FileMap, AnonMap
+from ..core.memory import MemoryException
 
 from .helpers import issymbolic
 ######################################################################
@@ -57,7 +57,7 @@ class UnicornEmulator(object):
             }[self._cpu.mode]
 
         else:
-            raise NotImplementedError('Unsupported architecture: %s' % self._cpu.arch)
+            raise NotImplementedError(f'Unsupported architecture: {self._cpu.arch}')
 
     def reset(self):
         self._emu = Uc(self._uc_arch, self._uc_mode)
@@ -186,7 +186,7 @@ class UnicornEmulator(object):
                         raise ConcretizeMemory(self._cpu.memory, offset, 8,
                                                "Concretizing for emulation")
 
-                self._emu.mem_write(address, ''.join(values))
+                self._emu.mem_write(address, b''.join(values))
 
             # Try emulation
             self._should_try_again = False
@@ -236,7 +236,7 @@ class UnicornEmulator(object):
         # Bring in the instruction itself
         instruction = self._cpu.decode_instruction(self._cpu.PC)
         text_bytes = self._cpu.read_bytes(self._cpu.PC, instruction.size)
-        self._emu.mem_write(self._cpu.PC, ''.join(text_bytes))
+        self._emu.mem_write(self._cpu.PC, b''.join(text_bytes))
 
         self._emu.hook_add(UC_HOOK_MEM_READ_UNMAPPED, self._hook_unmapped)
         self._emu.hook_add(UC_HOOK_MEM_WRITE_UNMAPPED, self._hook_unmapped)
@@ -261,9 +261,11 @@ class UnicornEmulator(object):
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("=" * 10)
             for register in self._cpu.canonical_registers:
-                logger.debug("Register % 3s  Manticore: %08x, Unicorn %08x",
-                             register, self._cpu.read_register(register),
-                             self._emu.reg_read(self._to_unicorn_id(register)))
+                logger.debug(
+                    f"Register {register:3s}  "
+                    f"Manticore: {self._cpu.read_register(register):08x}, "
+                    f"Unicorn {self._emu.reg_read(self._to_unicorn_id(register)):08x}"
+                )
             logger.debug(">" * 10)
 
         # Bring back Unicorn registers to Manticore
@@ -271,7 +273,7 @@ class UnicornEmulator(object):
             val = self._emu.reg_read(self._to_unicorn_id(reg))
             self._cpu.write_register(reg, val)
 
-        # Unicorn hack. On single step unicorn wont advance the PC register
+        # Unicorn hack. On single step, unicorn wont advance the PC register
         mu_pc = self.get_unicorn_pc()
         if saved_PC == mu_pc:
             self._cpu.PC = saved_PC + instruction.size

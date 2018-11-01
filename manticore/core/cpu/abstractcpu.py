@@ -1,25 +1,22 @@
 import inspect
 import logging
-import StringIO
+import io
 import string
 
 from functools import wraps
-from itertools import islice, imap
+from itertools import islice
 
-import capstone as cs
 import unicorn
 
 from .disasm import init_disassembler
-from ..smtlib import Expression, Bool, BitVec, Array, Operators, Constant
-from ..memory import (
-    ConcretizeMemory, InvalidMemoryAccess, MemoryException, FileMap, AnonMap
-)
+from ..smtlib import BitVec, Operators, Constant
+from ..memory import ConcretizeMemory, InvalidMemoryAccess
 from ...utils.helpers import issymbolic
 from ...utils.emulate import UnicornEmulator
 from ...utils.event import Eventful
 
 logger = logging.getLogger(__name__)
-register_logger = logging.getLogger('{}.registers'.format(__name__))
+register_logger = logging.getLogger(f'{__name__}.registers')
 
 ###################################################################################
 # Exceptions
@@ -28,12 +25,13 @@ register_logger = logging.getLogger('{}.registers'.format(__name__))
 class CpuException(Exception):
     ''' Base cpu exception '''
 
+
 class DecodeException(CpuException):
     '''
     Raised when trying to decode an unknown or invalid instruction '''
 
     def __init__(self, pc, bytes):
-        super(DecodeException, self).__init__("Error decoding instruction @%08x", pc)
+        super().__init__("Error decoding instruction @%08x" % pc)
         self.pc = pc
         self.bytes = bytes
 
@@ -59,7 +57,7 @@ class Interruption(CpuException):
     ''' A software interrupt. '''
 
     def __init__(self, N):
-        super(Interruption, self).__init__("CPU Software Interruption %08x", N)
+        super().__init__("CPU Software Interruption %08x" % N)
         self.N = N
 
 
@@ -67,7 +65,7 @@ class Syscall(CpuException):
     ''' '''
 
     def __init__(self):
-        super(Syscall, self).__init__("CPU Syscall")
+        super().__init__("CPU Syscall")
 
 
 class ConcretizeRegister(CpuException):
@@ -76,7 +74,7 @@ class ConcretizeRegister(CpuException):
     '''
 
     def __init__(self, cpu, reg_name, message=None, policy='MINMAX'):
-        self.message = message if message else "Concretizing {}".format(reg_name)
+        self.message = message if message else f"Concretizing {reg_name}"
 
         self.cpu = cpu
         self.reg_name = reg_name
@@ -89,7 +87,7 @@ class ConcretizeArgument(CpuException):
     '''
 
     def __init__(self, cpu, argnum, policy='MINMAX'):
-        self.message = "Concretizing argument #%d." % (argnum,)
+        self.message = f"Concretizing argument #{argnum}."
         self.cpu = cpu
         self.policy = policy
         self.argnum = argnum
@@ -119,7 +117,7 @@ class Operand(object):
     def __init__(self, cpu, op):
         '''
         This encapsulates the arch-independent way to access instruction
-        operands and immediates based on the dissasembler operand descriptor in
+        operands and immediates based on the disassembler operand descriptor in
         use. This class knows how to browse an operand and get its details.
 
         It also knows how to access the specific Cpu to get the actual values
@@ -285,7 +283,7 @@ class Abi(object):
         A reusable generator for increasing pointer-sized values from an address
         (usually the stack).
         '''
-        word_bytes = self._cpu.address_bit_size / 8
+        word_bytes = self._cpu.address_bit_size // 8
         while True:
             yield base
             base += word_bytes
@@ -300,7 +298,7 @@ class Abi(object):
         :return: Arguments to be passed to the model
         :rtype: tuple
         '''
-        spec = inspect.getargspec(model)
+        spec = inspect.getfullargspec(model)
 
         if spec.varargs:
             logger.warning("ABI: A vararg model must be a unary function.")
@@ -319,7 +317,7 @@ class Abi(object):
 
         # Create a stream of resolved arguments from argument descriptors
         descriptors = self.get_arguments()
-        argument_iter = imap(resolve_argument, descriptors)
+        argument_iter = map(resolve_argument, descriptors)
 
         # TODO(mark) this is here as a hack to avoid circular import issues
         from ...models import isvariadic
@@ -390,14 +388,14 @@ class SyscallAbi(Abi):
         raise NotImplementedError
 
     def get_argument_values(self, model, prefix_args):
-        self._last_arguments = super(SyscallAbi, self).get_argument_values(model, prefix_args)
+        self._last_arguments = super().get_argument_values(model, prefix_args)
         return self._last_arguments
 
     def invoke(self, model, prefix_args=None):
         # invoke() will call get_argument_values()
         self._last_arguments = ()
 
-        ret = super(SyscallAbi, self).invoke(model, prefix_args)
+        ret = super().invoke(model, prefix_args)
 
         if platform_logger.isEnabledFor(logging.DEBUG):
             # Try to expand strings up to max_arg_expansion
@@ -407,23 +405,22 @@ class SyscallAbi(Abi):
 
             args = []
             for arg in self._last_arguments:
-                arg_s = "0x{:x}".format(arg)
+                arg_s = f"0x{arg:x}"
                 if self._cpu.memory.access_ok(arg, 'r'):
-                    s = self._cpu.read_string(arg, max_arg_expansion)
-                    if all(c in string.printable for c in s):
-                        if len(s) == max_arg_expansion:
-                            s = s + '..'
-                        if len(s) > 2:
-                            arg_s = arg_s + ' ({})'.format(s.translate(None, '\n'))
+                    try:
+                        s = self._cpu.read_string(arg, max_arg_expansion)
+                        arg_s = f'({s.rstrip()})' if s else arg_s
+                    except UnicodeDecodeError:
+                        pass
                 args.append(arg_s)
 
             args_s = ', '.join(args)
 
-            ret_s = '{}'.format(ret)
+            ret_s = f'{ret}'
             if ret > min_hex_expansion:
-                ret_s = ret_s + '(0x{:x})'.format(ret)
+                ret_s = ret_s + f'(0x{ret:x})'
 
-            platform_logger.debug('%s(%s) -> %s', model.im_func.func_name, args_s, ret_s)
+            platform_logger.debug('%s(%s) -> %s', model.__func__.__name__, repr(args_s), ret_s)
 
 ############################################################################
 # Abstract cpu encapsulating common cpu methods used by platforms and executor.
@@ -451,7 +448,7 @@ class Cpu(Eventful):
     def __init__(self, regfile, memory, **kwargs):
         assert isinstance(regfile, RegisterFile)
         self._disasm = kwargs.pop("disasm", 'capstone')
-        super(Cpu, self).__init__(**kwargs)
+        super().__init__(**kwargs)
         self._regfile = regfile
         self._memory = memory
         self._instruction_cache = {}
@@ -464,7 +461,7 @@ class Cpu(Eventful):
         assert 'PC' in self._regfile
 
     def __getstate__(self):
-        state = super(Cpu, self).__getstate__()
+        state = super().__getstate__()
         state['regfile'] = self._regfile
         state['memory'] = self._memory
         state['icount'] = self._icount
@@ -479,7 +476,7 @@ class Cpu(Eventful):
         self._icount = state['icount']
         self._last_pc = state['last_pc']
         self._disasm = state['disassembler']
-        super(Cpu, self).__setstate__(state)
+        super().__setstate__(state)
 
     @property
     def icount(self):
@@ -547,9 +544,9 @@ class Cpu(Eventful):
 
         :param str name: Name of the register
         '''
-        assert name != '_regfile'
-        if hasattr(self, '_regfile') and name in self._regfile:
-            return self.read_register(name)
+        if name != '_regfile':
+            if name in self._regfile:
+                return self.read_register(name)
         raise AttributeError(name)
 
     def __setattr__(self, name, value):
@@ -560,9 +557,12 @@ class Cpu(Eventful):
         :param value: The value to set the register to
         :type param: int or long or Expression
         '''
-        if hasattr(self, '_regfile') and name in self._regfile:
-            return self.write_register(name, value)
-        object.__setattr__(self, name, value)
+        try:
+            if name in self._regfile:
+                return self.write_register(name, value)
+            object.__setattr__(self, name, value)
+        except AttributeError:
+            object.__setattr__(self, name, value)
 
     #############################
     # Memory access
@@ -585,7 +585,7 @@ class Cpu(Eventful):
         assert size in SANE_SIZES
         self._publish('will_write_memory', where, expression, size)
 
-        data = [Operators.CHR(Operators.EXTRACT(expression, offset, 8)) for offset in xrange(0, size, 8)]
+        data = [Operators.CHR(Operators.EXTRACT(expression, offset, 8)) for offset in range(0, size, 8)]
         self._memory.write(where, data, force)
 
         self._publish('did_write_memory', where, expression, size)
@@ -605,7 +605,7 @@ class Cpu(Eventful):
         assert size in SANE_SIZES
         self._publish('will_read_memory', where, size)
 
-        data = self._memory.read(where, size / 8, force)
+        data = self._memory.read(where, size // 8, force)
         assert (8 * len(data)) == size
         value = Operators.CONCAT(size, *map(Operators.ORD, reversed(data)))
 
@@ -621,7 +621,7 @@ class Cpu(Eventful):
         :type data: str or list
         :param force: whether to ignore memory permissions
         '''
-        for i in xrange(len(data)):
+        for i in range(len(data)):
             self.write_int(where + i, Operators.ORD(data[i]), 8, force)
 
     def read_bytes(self, where, size, force=False):
@@ -635,7 +635,7 @@ class Cpu(Eventful):
         :rtype: list[int or Expression]
         '''
         result = []
-        for i in xrange(size):
+        for i in range(size):
             result.append(Operators.CHR(self.read_int(where + i, 8, force)))
         return result
 
@@ -667,7 +667,7 @@ class Cpu(Eventful):
         :return: string read
         :rtype: str
         '''
-        s = StringIO.StringIO()
+        s = io.BytesIO()
         while True:
             c = self.read_int(where, 8, force)
 
@@ -680,7 +680,7 @@ class Cpu(Eventful):
                 max_length = max_length - 1
             s.write(Operators.CHR(c))
             where += 1
-        return s.getvalue()
+        return s.getvalue().decode()
 
     def push_bytes(self, data, force=False):
         '''
@@ -714,7 +714,7 @@ class Cpu(Eventful):
         :param force: whether to ignore memory permissions
         :return: New stack pointer
         '''
-        self.STACK -= self.address_bit_size / 8
+        self.STACK -= self.address_bit_size // 8
         self.write_int(self.STACK, value, force=force)
         return self.STACK
 
@@ -726,7 +726,7 @@ class Cpu(Eventful):
         :return: Value read
         '''
         value = self.read_int(self.STACK, force=force)
-        self.STACK += self.address_bit_size / 8
+        self.STACK += self.address_bit_size // 8
         return value
 
     #######################################
@@ -750,9 +750,10 @@ class Cpu(Eventful):
         if pc in self._instruction_cache:
             return self._instruction_cache[pc]
 
-        text = ''
+        text = b''
+
         # Read Instruction from memory
-        for address in xrange(pc, pc + self.max_instr_width):
+        for address in range(pc, pc + self.max_instr_width):
             # This reads a byte from memory ignoring permissions
             # and concretize it if symbolic
             if not self.memory.access_ok(address, 'x'):
@@ -763,7 +764,7 @@ class Cpu(Eventful):
             if issymbolic(c):
                 assert isinstance(c, BitVec) and c.size == 8
                 if isinstance(c, Constant):
-                    c = chr(c.value)
+                    c = bytes([c.value])
                 else:
                     logger.error('Concretize executable memory %r %r', c, text)
                     raise ConcretizeMemory(self.memory,
@@ -772,9 +773,8 @@ class Cpu(Eventful):
                                            policy='INSTRUCTION')
             text += c
 
-        # Pad potentially incomplete instruction with zeroes
-
-        code = text.ljust(self.max_instr_width, '\x00')
+        #Pad potentially incomplete instruction with zeroes
+        code = text.ljust(self.max_instr_width, b'\x00')
 
         try:
             # decode the instruction from code
@@ -842,8 +842,8 @@ class Cpu(Eventful):
 
             else:
                 text_bytes = ' '.join('%02x' % x for x in insn.bytes)
-                logger.info("Unimplemented instruction: 0x%016x:\t%s\t%s\t%s",
-                            insn.address, text_bytes, insn.mnemonic, insn.op_str)
+                logger.warning("Unimplemented instruction: 0x%016x:\t%s\t%s\t%s",
+                               insn.address, text_bytes, insn.mnemonic, insn.op_str)
                 self.emulate(insn)
 
         except (Interruption, Syscall) as e:
@@ -888,9 +888,7 @@ class Cpu(Eventful):
     def render_instruction(self, insn=None):
         try:
             insn = self.instruction
-            return "INSTRUCTION: 0x%016x:\t%s\t%s" % (insn.address,
-                                                      insn.mnemonic,
-                                                      insn.op_str)
+            return f"INSTRUCTION: 0x{insn.address:016x}:\t{insn.mnemonic}\t{insn.op_str}"
         except Exception as e:
             return "{can't decode instruction}"
 
@@ -900,12 +898,12 @@ class Cpu(Eventful):
         value = self.read_register(reg_name)
 
         if issymbolic(value):
-            aux = "%3s: " % reg_name + "%16s" % value
+            aux = f"{reg_name:3s}: {value:16s}"
             result += aux
-        elif isinstance(value, (int, long)):
-            result += "%3s: 0x%016x" % (reg_name, value)
+        elif isinstance(value, int):
+            result += f"{reg_name:3s}: 0x{value:016x}"
         else:
-            result += "%3s: %r" % (reg_name, value)
+            result += f"{reg_name:3s}: {value!r}"
         return result
 
     def render_registers(self):
@@ -913,8 +911,7 @@ class Cpu(Eventful):
         # backup, null, use, then restore the list.
         # will disabled_signals(self):
         #    return map(self.render_register, self._regfile.canonical_registers)
-        return map(self.render_register,
-                   sorted(self._regfile.canonical_registers))
+        return map(self.render_register, sorted(self._regfile.canonical_registers))
 
     # Generic string representation
     def __str__(self):
@@ -924,7 +921,7 @@ class Cpu(Eventful):
         :rtype: str
         :return: name and current value for all the registers.
         '''
-        result = self.render_instruction() + "\n"
+        result = f'{self.render_instruction()}\n'
         result += '\n'.join(self.render_registers())
         return result
 

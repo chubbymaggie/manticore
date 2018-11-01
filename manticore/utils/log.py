@@ -1,13 +1,13 @@
 import logging
 import sys
 import types
+from logging import DEBUG, WARNING, ERROR, INFO
 
 
 class ContextFilter(logging.Filter):
     '''
     This is a filter which injects contextual information into the log.
     '''
-
     def summarized_name(self, name):
         '''
         Produce a summarized record name
@@ -15,28 +15,54 @@ class ContextFilter(logging.Filter):
         '''
         components = name.split('.')
         prefix = '.'.join(c[0] for c in components[:-1])
-        return '{}.{}'.format(prefix, components[-1])
+        return f'{prefix}.{components[-1]}'
+
+    colors_disabled = False
+
+    coloring = {u'DEBUG':u'magenta', u'WARNING':u'yellow',
+        u'ERROR':u'red', u'INFO':u'blue'}
+    colors =  dict(zip([u'black', u'red', u'green', u'yellow',
+        u'blue', u'magenta', u'cyan', u'white'], map(str, range(30, 30 + 8))))
+
+    color_map = {}
+    for k, v in coloring.items():
+        color_map[k] = colors[v]
+
+    colored_levelname_format = u'\x1b[{}m{}:\x1b[0m'
+    plain_levelname_format = u'{}:'
+
+    def colored_level_name(self, levelname):
+        '''
+        Colors the logging level in the logging record
+        '''
+        if self.colors_disabled:
+            return self.plain_levelname_format.format(levelname)
+        else:
+            return self.colored_levelname_format.format(self.color_map[levelname], levelname)
 
     def filter(self, record):
-        if hasattr(self, 'stateid') and isinstance(self.stateid, (int, long)):
-            record.stateid = '[%d]' % self.stateid
+        if hasattr(self, 'stateid') and isinstance(self.stateid, int):
+            record.stateid = f'[{self.stateid}]'
         else:
             record.stateid = ''
 
         record.name = self.summarized_name(record.name)
+        record.levelname = self.colored_level_name(record.levelname)
         return True
 
 
 manticore_verbosity = 0
 all_loggers = []
 
+def disable_colors():
+    ContextFilter.colors_disabled = True
 
-def init_logging():
+def init_logging(default_level=logging.WARNING):
     global all_loggers
     loggers = logging.getLogger().manager.loggerDict.keys()
 
     ctxfilter = ContextFilter()
-    logfmt = ("%(asctime)s: [%(process)d]%(stateid)s %(name)s:%(levelname)s:"
+    logfmt = ("%(asctime)s: [%(process)d]%(stateid)s %(name)s:%(levelname)s"
               " %(message)s")
     handler = logging.StreamHandler(sys.stdout)
     formatter = logging.Formatter(logfmt)
@@ -49,7 +75,7 @@ def init_logging():
             continue
         logger.addHandler(handler)
         logger.propagate = False
-        logger.setLevel(logging.WARNING)
+        logger.setLevel(default_level)
         logger.addFilter(ctxfilter)
         logger.setState = types.MethodType(loggerSetState, logger)
         all_loggers.append(name)
@@ -62,7 +88,7 @@ def loggerSetState(logger, stateid):
 
 def set_verbosity(setting):
     global manticore_verbosity, all_loggers
-    zero = map(lambda x: (x, logging.WARNING), all_loggers)
+    zero = [(x, logging.WARNING) for x in all_loggers]
     levels = [
         # 0
         zero,
@@ -113,7 +139,7 @@ def set_verbosity(setting):
         return True
 
     def glob(lst, expression):
-        return filter(lambda name: match(name, expression), lst)
+        return [name for name in lst if match(name, expression)]
 
     # Takes a value and ensures it's in a certain range
     def clamp(val, minimum, maximum):

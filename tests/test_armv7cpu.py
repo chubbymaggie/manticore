@@ -25,9 +25,9 @@ def assemble(asm, mode=CS_MODE_ARM):
     elif CS_MODE_THUMB == mode:
         ords = ks_thumb.asm(asm)[0]
     else:
-        raise Exception('bad processor mode for assembly: {}'.format(mode))
+        raise Exception(f'bad processor mode for assembly: {mode}')
     if not ords:
-        raise Exception('bad assembly: {}'.format(asm))
+        raise Exception(f'bad assembly: {asm}')
     return ''.join(map(chr, ords))
 
 
@@ -66,19 +66,19 @@ class Armv7CpuTest(unittest.TestCase):
     def test_stack_push(self):
         self.c.stack_push(42)
         self.c.stack_push(44)
-        self.assertItemsEqual(self.c.read(self.c.STACK, 4), '\x2c\x00\x00\x00')
-        self.assertItemsEqual(self.c.read(self.c.STACK + 4, 4), '\x2a\x00\x00\x00')
+        self.assertEqual(b''.join(self.c.read(self.c.STACK, 4)), b'\x2c\x00\x00\x00')
+        self.assertEqual(b''.join(self.c.read(self.c.STACK + 4, 4)), b'\x2a\x00\x00\x00')
 
     def test_stack_pop(self):
         v = 0x55
         v_bytes = struct.pack('<I', v)
         self.c.stack_push(v)
         val = self.c.stack_pop()
-        self.assertItemsEqual(self.c.read(self.c.STACK - 4, 4), v_bytes)
+        self.assertEqual(b''.join(self.c.read(self.c.STACK - 4, 4)), v_bytes)
 
     def test_stack_peek(self):
         self.c.stack_push(42)
-        self.assertItemsEqual(self.c.stack_peek(), '\x2a\x00\x00\x00')
+        self.assertEqual(b''.join(self.c.stack_peek()), b'\x2a\x00\x00\x00')
 
     def test_readwrite_int(self):
         self.c.STACK -= 4
@@ -880,7 +880,7 @@ class Armv7CpuInstructions(unittest.TestCase):
     @itest_setregs("R1=3")
     def test_push_one_reg(self):
         self.cpu.execute()
-        self.assertItemsEqual(self.cpu.stack_peek(), struct.pack('<I', 3))
+        self.assertEqual(b''.join(self.cpu.stack_peek()), struct.pack('<I', 3))
 
     @itest_custom("push {r1, r2, r3}")
     @itest_setregs("R1=3", "R2=0x55", "R3=0xffffffff")
@@ -889,7 +889,7 @@ class Armv7CpuInstructions(unittest.TestCase):
         self.cpu.execute()
         sp = self.cpu.STACK
         self.assertEqual(self.rf.read('SP'), pre_sp - (3 * 4))
-        self.assertItemsEqual(self.cpu.stack_peek(), struct.pack('<I', 3))
+        self.assertEqual(b''.join(self.cpu.stack_peek()), struct.pack('<I', 3))
         self.assertEqual(self.cpu.read_int(sp + 4, self.cpu.address_bit_size), 0x55)
         self.assertEqual(self.cpu.read_int(sp + 8, self.cpu.address_bit_size), 0xffffffff)
 
@@ -1066,6 +1066,29 @@ class Armv7CpuInstructions(unittest.TestCase):
     def test_sub_imm(self):
         self.cpu.execute()
         self.assertEqual(self.rf.read('R3'), 5)
+
+    @itest_custom("uqsub8 r3, r1, r2")
+    @itest_setregs("R1=0x04030201", "R2=0x01010101")
+    def test_uqsub8_concrete(self):
+        self.cpu.execute()
+        self.assertEqual(self.rf.read('R3'), 0x03020100)
+
+    @itest_custom("uqsub8 r3, r1, r2")
+    @itest_setregs("R1=0x05040302", "R2=0x07050101")
+    def test_uqsub8_concrete_saturated(self):
+        self.cpu.execute()
+        self.assertEqual(self.rf.read('R3'), 0x00000201)
+
+    @itest_custom("uqsub8 r3, r1, r2")
+    @itest_setregs("R2=0x01010101")
+    def test_uqsub8_sym(self):
+        op1 = BitVecVariable(32, 'op1')
+        self.cpu.memory.constraints.add(op1 >= 0x04030201)
+        self.cpu.memory.constraints.add(op1 <  0x04030204)
+        self.cpu.R1 = op1
+        self.cpu.execute()
+        all_vals = solver.get_all_values(self.cpu.memory.constraints, self.cpu.R3)
+        self.assertIn(0x03020100, all_vals)
 
     @itest_custom("sbc r3, r1, #5")
     @itest_setregs("R1=10")
@@ -1581,6 +1604,12 @@ class Armv7CpuInstructions(unittest.TestCase):
     def test_uxtb(self):
         self.assertEqual(self.cpu.R2, 0x55555555)
         self.assertEqual(self.cpu.R1, 0x55)
+
+    @itest_setregs("R1=0x45", "R2=0x55555555")
+    @itest("uxth r1, r2")
+    def test_uxth(self):
+        self.assertEqual(self.cpu.R2, 0x55555555)
+        self.assertEqual(self.cpu.R1, 0x5555)
 
     @itest_setregs("R1=1","R2=0","R3=0","R4=0","R12=0x4141")
     @itest_thumb_multiple(["cmp r1, #1", "itt ne", "mov r2, r12", "mov r3, r12", "mov r4, r12"])

@@ -37,7 +37,7 @@ def instruction(body):
             if issymbolic(should_execute):
                 # Let's remember next time we get here we should not do this again
                 cpu._at_symbolic_conditional = True
-                i_size = cpu.address_bit_size / 8
+                i_size = cpu.address_bit_size // 8
                 cpu.PC = Operators.ITEBV(cpu.address_bit_size, should_execute, cpu.PC - i_size,
                                          cpu.PC)
                 return
@@ -55,7 +55,7 @@ def instruction(body):
 
 class Armv7Operand(Operand):
     def __init__(self, cpu, op, **kwargs):
-        super(Armv7Operand, self).__init__(cpu, op, **kwargs)
+        super().__init__(cpu, op, **kwargs)
 
     @property
     def type(self):
@@ -177,14 +177,14 @@ class Armv7Operand(Operand):
         # of the instruction following the next instruction.
         if self.mem.base in ('PC', 'R15'):
             if self.cpu.mode == cs.CS_MODE_ARM:
-                logger.debug("ARM mode PC relative addressing: PC + offset: 0x{:x} + 0x{:x}".format(base, 4))
+                logger.debug(f"ARM mode PC relative addressing: PC + offset: 0x{base:x} + 0x{4:x}")
                 return base + 4
             else:
                 # base currently has the value PC + len(current_instruction)
                 # we need (PC & 0xFFFFFFFC) + 4
                 # thus:
                 new_base = (base - self.cpu.instruction.size) & 0xFFFFFFFC
-                logger.debug("THUMB mode PC relative addressing: ALIGN(PC) + offset => 0x{:x} + 0x{:x}".format(new_base, 4))
+                logger.debug(f"THUMB mode PC relative addressing: ALIGN(PC) + offset => 0x{new_base:x} + 0x{4:x}")
                 return new_base + 4
         else:
             return base
@@ -204,14 +204,14 @@ class Armv7RegisterFile(RegisterFile):
         ARM Register file abstraction. GPRs use ints for read/write. APSR
         flags allow writes of bool/{1, 0} but always read bools.
         """
-        super(Armv7RegisterFile, self).__init__({'SB': 'R9',
-                                                 'SL': 'R10',
-                                                 'FP': 'R11',
-                                                 'IP': 'R12',
-                                                 'STACK': 'R13',
-                                                 'SP': 'R13',
-                                                 'LR': 'R14',
-                                                 'PC': 'R15'})
+        super().__init__({'SB': 'R9',
+                          'SL': 'R10',
+                          'FP': 'R11',
+                          'IP': 'R12',
+                          'STACK': 'R13',
+                          'SP': 'R13',
+                          'LR': 'R14',
+                          'PC': 'R15'})
         self._regs = {}
         # 32 bit registers
         for reg_name in ('R0', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8',
@@ -290,7 +290,7 @@ class Armv7RegisterFile(RegisterFile):
 
     @property
     def all_registers(self):
-        return super(Armv7RegisterFile, self).all_registers + \
+        return super().all_registers + \
             ('R0', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15',
                 'D0', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12', 'D13', 'D14', 'D15',
                 'D16', 'D17', 'D18', 'D19', 'D20', 'D21', 'D22', 'D23', 'D24', 'D25', 'D26', 'D27', 'D28', 'D29',
@@ -316,7 +316,7 @@ class Armv7LinuxSyscallAbi(SyscallAbi):
 
     def get_arguments(self):
         for i in range(6):
-            yield 'R{}'.format(i)
+            yield f'R{i}'
 
     def write_result(self, result):
         self._cpu.R0 = result
@@ -360,10 +360,10 @@ class Armv7Cpu(Cpu):
         self._last_flags = {'C': 0, 'V': 0, 'N': 0, 'Z': 0, 'GE': 0}
         self._at_symbolic_conditional = False
         self._mode = cs.CS_MODE_ARM
-        super(Armv7Cpu, self).__init__(Armv7RegisterFile(), memory)
+        super().__init__(Armv7RegisterFile(), memory)
 
     def __getstate__(self):
-        state = super(Armv7Cpu, self).__getstate__()
+        state = super().__getstate__()
         state['_last_flags'] = self._last_flags
         state['at_symbolic_conditional'] = self._at_symbolic_conditional
         state['_it_conditional'] = self._it_conditional
@@ -375,7 +375,7 @@ class Armv7Cpu(Cpu):
         self._at_symbolic_conditional = state['at_symbolic_conditional']
         self._it_conditional = state['_it_conditional']
         self._mode = state['_mode']
-        super(Armv7Cpu, self).__setstate__(state)
+        super().__setstate__(state)
 
     @property
     def mode(self):
@@ -386,7 +386,7 @@ class Armv7Cpu(Cpu):
         assert new_mode in (cs.CS_MODE_ARM, cs.CS_MODE_THUMB)
 
         if self._mode != new_mode:
-            logger.debug("swapping into {} mode".format("ARM" if new_mode == cs.CS_MODE_ARM else "THUMB"))
+            logger.debug(f'swapping into {"ARM" if new_mode == cs.CS_MODE_ARM else "THUMB"} mode')
 
         self._mode = new_mode
         self.disasm.disasm.mode = new_mode
@@ -426,9 +426,9 @@ class Armv7Cpu(Cpu):
             instr2 commits all in _last_flags
             now overflow=1 even though it should still be 0
         """
-        unupdated_flags = self._last_flags.viewkeys() - flags.viewkeys()
+        unupdated_flags = self._last_flags.keys() - flags.keys()
         for flag in unupdated_flags:
-            flag_name = 'APSR_{}'.format(flag)
+            flag_name = f'APSR_{flag}'
             self._last_flags[flag] = self.regfile.read(flag_name)
         self._last_flags.update(flags)
 
@@ -436,8 +436,8 @@ class Armv7Cpu(Cpu):
         # XXX: capstone incorrectly sets .update_flags for adc
         if self.instruction.mnemonic == 'adc':
             return
-        for flag, val in self._last_flags.iteritems():
-            flag_name = 'APSR_{}'.format(flag)
+        for flag, val in self._last_flags.items():
+            flag_name = f'APSR_{flag}'
             self.regfile.write(flag_name, val)
 
     def _shift(cpu, value, _type, amount, carry):
@@ -477,12 +477,12 @@ class Armv7Cpu(Cpu):
 
     # TODO add to abstract cpu, and potentially remove stacksub/add from it?
     def stack_push(self, data, nbytes=None):
-        if isinstance(data, (int, long)):
-            nbytes = nbytes or self.address_bit_size / 8
+        if isinstance(data, int):
+            nbytes = nbytes or self.address_bit_size // 8
             self.SP -= nbytes
             self.write_int(self.SP, data, nbytes * 8)
         elif isinstance(data, BitVec):
-            self.SP -= data.size / 8
+            self.SP -= data.size // 8
             self.write_int(self.SP, data, data.size)
         elif isinstance(data, str):
             self.SP -= len(data)
@@ -748,6 +748,18 @@ class Armv7Cpu(Cpu):
         status.write(0)
         return cpu._STR(cpu.address_bit_size, *args)
 
+    def _UXT(cpu, dest, src, src_width):
+        """
+        Helper for UXT* family of instructions.
+
+        :param ARMv7Operand dest: the destination register; register
+        :param ARMv7Operand dest: the source register; register
+        :param int src_width: bits to consider of the src operand
+        """
+        val = GetNBits(src.read(), src_width)
+        word = Operators.ZEXTEND(val, cpu.address_bit_size)
+        dest.write(word)
+
     @instruction
     def UXTB(cpu, dest, src):
         """
@@ -757,9 +769,18 @@ class Armv7Cpu(Cpu):
         :param ARMv7Operand dest: the destination register; register
         :param ARMv7Operand dest: the source register; register
         """
-        val = GetNBits(src.read(), 8)
-        word = Operators.ZEXTEND(val, cpu.address_bit_size)
-        dest.write(word)
+        cpu._UXT(dest, src, 8)
+
+    @instruction
+    def UXTH(cpu, dest, src):
+        """
+        UXTH extracts an 16-bit value from a register, zero-extends
+        it to the size of the register, and writes the result to the destination register.
+
+        :param ARMv7Operand dest: the destination register; register
+        :param ARMv7Operand dest: the source register; register
+        """
+        cpu._UXT(dest, src, 16)
 
     @instruction
     def PLD(cpu, addr, offset=None):
@@ -806,7 +827,7 @@ class Armv7Cpu(Cpu):
         if dest.reg in ('PC', 'R15'):
             cpu._set_mode_by_val(word)
             word &= ~0x1
-            logger.debug("LDR writing 0x{:x} -> PC".format(word))
+            logger.debug(f"LDR writing 0x{word:x} -> PC")
         dest.write(word)
         cpu._cs_hack_ldr_str_writeback(src, offset, writeback)
 
@@ -958,7 +979,7 @@ class Armv7Cpu(Cpu):
         # The `blx <label>` form of this instruction forces a mode swap
         # Otherwise check the lsb of the destination and set the mode
         if dest.type == 'immediate':
-            logger.debug("swapping mode due to BLX at inst 0x{:x}".format(address))
+            logger.debug(f"swapping mode due to BLX at inst 0x{address:x}")
             cpu._swap_mode()
         elif dest.type == 'register':
             cpu._set_mode_by_val(dest.read())
@@ -971,7 +992,7 @@ class Armv7Cpu(Cpu):
     @instruction
     def POP(cpu, *regs):
         for reg in regs:
-            val = cpu.stack_pop(cpu.address_bit_size / 8)
+            val = cpu.stack_pop(cpu.address_bit_size // 8)
             if reg.reg in ('PC', 'R15'):
                 cpu._set_mode_by_val(val)
                 val = val & ~0x1
@@ -991,7 +1012,7 @@ class Armv7Cpu(Cpu):
         msb = cpu.address_bit_size - 1
         result = 32
 
-        for pos in xrange(cpu.address_bit_size):
+        for pos in range(cpu.address_bit_size):
             cond = Operators.EXTRACT(value, pos, 1) == 1
             result = Operators.ITEBV(cpu.address_bit_size, cond, msb - pos, result)
 
@@ -1021,14 +1042,14 @@ class Armv7Cpu(Cpu):
         """
         address = base.read()
         if insn_id == cs.arm.ARM_INS_LDMIB:
-            address += cpu.address_bit_size / 8
+            address += cpu.address_bit_size // 8
 
         for reg in regs:
             reg.write(cpu.read_int(address, cpu.address_bit_size))
-            address += reg.size / 8
+            address += reg.size // 8
 
         if insn_id == cs.arm.ARM_INS_LDMIB:
-            address -= reg.size / 8
+            address -= reg.size // 8
 
         if cpu.instruction.writeback:
             base.writeback(address)
@@ -1118,7 +1139,7 @@ class Armv7Cpu(Cpu):
     @instruction
     def SVC(cpu, op):
         if op.read() != 0:
-            logger.warning("Bad SVC number: {:08}".format(op.read()))
+            logger.warning(f"Bad SVC number: {op.read():08}")
         raise Interruption(0)
 
     @instruction
@@ -1223,7 +1244,7 @@ class Armv7Cpu(Cpu):
     def _VSTM(cpu, address, *regs):
         for reg in regs:
             cpu.write_int(address, reg.read(), reg.size)
-            address += reg.size / 8
+            address += reg.size // 8
 
         return address
 
@@ -1235,7 +1256,7 @@ class Armv7Cpu(Cpu):
 
     @instruction
     def VSTMDB(cpu, base, *regs):
-        address = base.read() - (cpu.address_bit_size / 8) * len(regs)
+        address = base.read() - cpu.address_bit_size // 8 * len(regs)
         updated_address = cpu._VSTM(address, *regs)
         if cpu.instruction.writeback:
             base.writeback(updated_address)
@@ -1258,3 +1279,15 @@ class Armv7Cpu(Cpu):
     @instruction
     def LDCL(cpu, *operands):
         """Occasionally used in glibc (longjmp in ld.so). Nop under our execution model."""
+
+    @instruction
+    def UQSUB8(cpu, dest, op1, op2):
+        src1 = op1.read()
+        src2 = op2.read()
+        result = []
+        for offset in reversed(range(0, op1.size, 8)):
+            byte1 = Operators.EXTRACT(src1, offset, 8)
+            byte2 = Operators.EXTRACT(src2, offset, 8)
+            byte_diff = byte1 - byte2
+            result.append(Operators.ITEBV(8, byte_diff < 0, 0, byte_diff))
+        dest.write(Operators.CONCAT(dest.size, *result))

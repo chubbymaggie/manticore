@@ -1,7 +1,8 @@
+
 # Minimal INTEL assembler expression calculator
 import ply.yacc as yacc
 import copy
-from ..smtlib import Operators, Bool
+from ..smtlib import Operators
 # Lexer
 # ------------------------------------------------------------
 # calclex.py
@@ -98,7 +99,7 @@ def t_TOKEN(t):
     elif re_SEGMENT.match(t.value):
         t.type = 'SEGMENT'
     else:
-        raise Exception("Unknown:<%s>" % t.value)
+        raise Exception(f"Unknown:<{t.value}>")
     return t
 
 # Define a rule so we can track line numbers
@@ -116,7 +117,7 @@ t_ignore = ' \t'
 
 
 def t_error(t):
-    print "Illegal character '%s'" % t.value[0]
+    print("Illegal character '%s'" % t.value[0])
     t.lexer.skip(1)
 
 
@@ -137,11 +138,11 @@ precedence = (
 
 
 def default_read_memory(address, size):
-    return "READM(%08x,%d)" % (address, size)
+    return f"READM({address:08x},{size})"
 
 
 def default_read_register(reg):
-    return "REG(%s)" % (reg)
+    return f"REG({reg})"
 
 
 def default_get_descriptor(selector):
@@ -166,7 +167,7 @@ sizes = copy.copy(default_sizes_32)
 
 def p_expression_div(p):
     'expression : expression DIVIDE expression'
-    p[0] = p[1] / p[3]
+    p[0] = p[1] // p[3]
 
 
 def p_expression_mul(p):
@@ -296,7 +297,7 @@ def p_expression_ge(p):
 
 # Error rule for syntax errors
 def p_error(p):
-    print "Syntax error in input:", p
+    print("Syntax error in input:", p)
 
 # Build the parser
 
@@ -339,10 +340,10 @@ def parse(expression, read_memory=None, read_register=None, get_descriptor=None,
 if __name__ == '__main__':
     while True:
         try:
-            s = raw_input('calc > ')
+            s = input('calc > ')
         except EOFError:
             break
         if not s:
             continue
         result = parse(s)
-        print result
+        print(result)

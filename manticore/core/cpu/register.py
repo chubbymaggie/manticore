@@ -22,9 +22,9 @@ class Register(object):
             self.value = val
         elif isinstance(val, BitVec):
             self.value = val.Bool() if self.is_flag() else val
-        elif isinstance(val, (int, long)):
+        elif isinstance(val, int):
             self.value = Operators.EXTRACT(val, 0, self.width)
             if self.is_flag():
                 self.value = bool(self.value)
         else:
-            raise TypeError('Cannot store {} in Register'.format(val.__class__.__name__))
+            raise TypeError(f'Cannot store {val.__class__.__name__} in Register')
