@@ -2,7 +2,7 @@ import signal
 import logging
 
 
-class WithKeyboardInterruptAs(object):
+class WithKeyboardInterruptAs:
     def __init__(self, callback):
         if callback is None:
             callback = lambda *args, **kwargs: None
@@ -22,7 +22,7 @@ class WithKeyboardInterruptAs(object):
             self.old_handler(sig, frame)
         else:
             self.callback()
-            logging.debug('SIGINT received. Supressing KeyboardInterrupt.')
+            logging.debug("SIGINT received. Supressing KeyboardInterrupt.")
 
     def __exit__(self, type, value, traceback):
         try:

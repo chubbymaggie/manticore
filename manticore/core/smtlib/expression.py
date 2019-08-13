@@ -1,10 +1,12 @@
 from functools import reduce
-import numbers
 import uuid
 
+import re
+import copy
 
-class Expression(object):
-    ''' Abstract taintable Expression. '''
+
+class Expression:
+    """ Abstract taintable Expression. """
 
     def __init__(self, taint=()):
         if self.__class__ is Expression:
@@ -14,7 +16,7 @@ class Expression(object):
         self._taint = frozenset(taint)
 
     def __repr__(self):
-        return '<{:s} at {:x}{:s}>'.format(type(self).__name__, id(self), self.taint and '-T' or '')
+        return "<{:s} at {:x}{:s}>".format(type(self).__name__, id(self), self.taint and "-T" or "")
 
     @property
     def is_tainted(self):
@@ -25,11 +27,85 @@ class Expression(object):
         return self._taint
 
 
+def issymbolic(value):
+    """
+        Helper to determine whether an object is symbolic (e.g checking
+        if data read from memory is symbolic)
+
+        :param object value: object to check
+        :return: whether `value` is symbolic
+        :rtype: bool
+        """
+    return isinstance(value, Expression)
+
+
+def istainted(arg, taint=None):
+    """
+    Helper to determine whether an object if tainted.
+    :param arg: a value or Expression
+    :param taint: a regular expression matching a taint value (eg. 'IMPORTANT.*'). If None, this function checks for any taint value.
+    """
+
+    if not issymbolic(arg):
+        return False
+    if taint is None:
+        return len(arg.taint) != 0
+    for arg_taint in arg.taint:
+        m = re.match(taint, arg_taint, re.DOTALL | re.IGNORECASE)
+        if m:
+            return True
+    return False
+
+
+def get_taints(arg, taint=None):
+    """
+    Helper to list an object taints.
+    :param arg: a value or Expression
+    :param taint: a regular expression matching a taint value (eg. 'IMPORTANT.*'). If None, this function checks for any taint value.
+    """
+
+    if not issymbolic(arg):
+        return
+    for arg_taint in arg.taint:
+        if taint is not None:
+            m = re.match(taint, arg_taint, re.DOTALL | re.IGNORECASE)
+            if m:
+                yield arg_taint
+        else:
+            yield arg_taint
+    return
+
+
+def taint_with(arg, *taints, value_bits=256, index_bits=256):
+    """
+    Helper to taint a value.
+    :param arg: a value or Expression
+    :param taint: a regular expression matching a taint value (eg. 'IMPORTANT.*'). If None, this function checks for any taint value.
+    """
+
+    tainted_fset = frozenset(tuple(taints))
+    if not issymbolic(arg):
+        if isinstance(arg, int):
+            arg = BitVecConstant(value_bits, arg)
+            arg._taint = tainted_fset
+        else:
+            raise ValueError("type not supported")
+
+    else:
+        if isinstance(arg, BitVecVariable):
+            arg = arg + BitVecConstant(value_bits, 0, taint=tainted_fset)
+        else:
+            arg = copy.copy(arg)
+            arg._taint |= tainted_fset
+
+    return arg
+
+
 class Variable(Expression):
     def __init__(self, name, *args, **kwargs):
         if self.__class__ is Variable:
             raise TypeError
-        assert isinstance(name, str) and ' ' not in name
+        assert isinstance(name, str) and " " not in name
         super().__init__(*args, **kwargs)
         self._name = name
 
@@ -41,13 +117,14 @@ class Variable(Expression):
     def name(self):
         return self._name
 
+    def __copy__(self, memo):
+        raise Exception("Copying of Variables is not allowed.")
+
     def __deepcopy__(self, memo):
-        cls = self.__class__
-        memo[id(self)] = self
-        return self
+        raise Exception("Copying of Variables is not allowed.")
 
     def __repr__(self):
-        return '<{:s}({:s}) at {:x}>'.format(type(self).__name__, self.name, id(self))
+        return "<{:s}({:s}) at {:x}>".format(type(self).__name__, self.name, id(self))
 
 
 class Constant(Expression):
@@ -67,13 +144,13 @@ class Operation(Expression):
     def __init__(self, *operands, **kwargs):
         if self.__class__ is Operation:
             raise TypeError
-        assert len(operands) > 0
-        assert all(isinstance(x, Expression) for x in operands)
+        # assert len(operands) > 0
+        # assert all(isinstance(x, Expression) for x in operands)
         self._operands = operands
 
         # If taint was not forced by a keyword argument, calculate default
-        if 'taint' not in kwargs:
-            kwargs['taint'] = reduce(lambda x, y: x.union(y.taint), operands, frozenset())
+        if "taint" not in kwargs:
+            kwargs["taint"] = reduce(lambda x, y: x.union(y.taint), operands, frozenset())
 
         super().__init__(**kwargs)
 
@@ -137,7 +214,7 @@ class BoolVariable(Bool, Variable):
 
     @property
     def declaration(self):
-        return f'(declare-fun {self.name} () Bool)'
+        return f"(declare-fun {self.name} () Bool)"
 
 
 class BoolConstant(Bool, Constant):
@@ -190,7 +267,7 @@ class BoolITE(BoolOperation):
 
 
 class BitVec(Expression):
-    ''' This adds a bitsize to the Expression class '''
+    """ This adds a bitsize to the Expression class """
 
     def __init__(self, size, *operands, **kwargs):
         super().__init__(*operands, **kwargs)
@@ -390,7 +467,7 @@ class BitVecVariable(BitVec, Variable):
 
     @property
     def declaration(self):
-        return f'(declare-fun {self.name} () (_ BitVec {self.size}))'
+        return f"(declare-fun {self.name} () (_ BitVec {self.size}))"
 
 
 class BitVecConstant(BitVec, Constant):
@@ -553,8 +630,7 @@ class UnsignedGreaterThan(BoolOperation):
 class UnsignedGreaterOrEqual(BoolOperation):
     def __init__(self, a, b, *args, **kwargs):
         assert a.size == b.size
-        super(UnsignedGreaterOrEqual,
-              self).__init__(a, b, *args, **kwargs)
+        super(UnsignedGreaterOrEqual, self).__init__(a, b, *args, **kwargs)
 
 
 ###############################################################################
@@ -569,13 +645,14 @@ class Array(Expression):
         self._index_max = index_max
         self._value_bits = value_bits
         super().__init__(*operands, **kwargs)
-        assert type(self) is not Array, 'Abstract class'
+        assert type(self) is not Array, "Abstract class"
 
     def _get_size(self, index):
         start, stop = self._fix_index(index)
         size = stop - start
         if isinstance(size, BitVec):
-            from manticore.core.smtlib.visitors import simplify
+            from .visitors import simplify
+
             size = simplify(size)
         else:
             size = BitVecConstant(self.index_bits, size)
@@ -604,17 +681,18 @@ class Array(Expression):
 
     def cast_index(self, index):
         if isinstance(index, int):
-            #assert self.index_max is None or index >= 0 and index < self.index_max
+            # assert self.index_max is None or index >= 0 and index < self.index_max
             return BitVecConstant(self.index_bits, index)
         assert isinstance(index, BitVec) and index.size == self.index_bits
         return index
 
     def cast_value(self, value):
-        if isinstance(value, str) and len(value) == 1:
+        if isinstance(value, (str, bytes)) and len(value) == 1:
             value = ord(value)
         if isinstance(value, int):
             return BitVecConstant(self.value_bits, value)
-        assert isinstance(value, BitVec) and value.size == self.value_bits
+        assert isinstance(value, BitVec)
+        assert value.size == self.value_bits
         return value
 
     def __len__(self):
@@ -643,7 +721,7 @@ class Array(Expression):
 
     def write(self, offset, buf):
         if not isinstance(buf, (Array, bytearray)):
-            raise TypeError('Array or bytearray expected got {:s}'.format(type(buf)))
+            raise TypeError("Array or bytearray expected got {:s}".format(type(buf)))
         arr = self
         for i, val in enumerate(buf):
             arr = arr.store(offset + i, val)
@@ -664,7 +742,7 @@ class Array(Expression):
         return self.select(self.cast_index(index))
 
     def __eq__(self, other):
-        #FIXME taint
+        # FIXME taint
         def compare_buffers(a, b):
             if len(a) != len(b):
                 return BoolConstant(False)
@@ -674,6 +752,7 @@ class Array(Expression):
                 if cond is BoolConstant(False):
                     return BoolConstant(False)
             return cond
+
         return compare_buffers(self, other)
 
     def __ne__(self, other):
@@ -707,7 +786,10 @@ class Array(Expression):
         value = BitVec(size * self.value_bits).cast(value)
         array = self
         for offset in range(size):
-            array = array.store(address + offset, BitVecExtract(value, (size - 1 - offset) * self.value_bits, self.value_bits))
+            array = array.store(
+                address + offset,
+                BitVecExtract(value, (size - 1 - offset) * self.value_bits, self.value_bits),
+            )
         return array
 
     def write_LE(self, address, value, size):
@@ -715,7 +797,10 @@ class Array(Expression):
         value = BitVec(size * self.value_bits).cast(value)
         array = self
         for offset in reversed(range(size)):
-            array = array.store(address + offset, BitVecExtract(value, (size - 1 - offset) * self.value_bits, self.value_bits))
+            array = array.store(
+                address + offset,
+                BitVecExtract(value, (size - 1 - offset) * self.value_bits, self.value_bits),
+            )
         return array
 
     def __add__(self, other):
@@ -723,11 +808,19 @@ class Array(Expression):
             raise TypeError("can't concat Array to {}".format(type(other)))
         if isinstance(other, Array):
             if self.index_bits != other.index_bits or self.value_bits != other.value_bits:
-                raise ValueError('Array sizes do not match for concatenation')
+                raise ValueError("Array sizes do not match for concatenation")
 
-        from manticore.core.smtlib.visitors import simplify
-        #FIXME This should be related to a constrainSet
-        new_arr = ArrayProxy(ArrayVariable(self.index_bits, self.index_max + len(other), self.value_bits, 'concatenation{}'.format(uuid.uuid1())))
+        from .visitors import simplify
+
+        # FIXME This should be related to a constrainSet
+        new_arr = ArrayProxy(
+            ArrayVariable(
+                self.index_bits,
+                self.index_max + len(other),
+                self.value_bits,
+                "concatenation{}".format(uuid.uuid1()),
+            )
+        )
         for index in range(self.index_max):
             new_arr[index] = simplify(self[index])
         for index in range(len(other)):
@@ -739,15 +832,25 @@ class Array(Expression):
             raise TypeError("can't concat Array to {}".format(type(other)))
         if isinstance(other, Array):
             if self.index_bits != other.index_bits or self.value_bits != other.value_bits:
-                raise ValueError('Array sizes do not match for concatenation')
+                raise ValueError("Array sizes do not match for concatenation")
 
-        from manticore.core.smtlib.visitors import simplify
-        #FIXME This should be related to a constrainSet
-        new_arr = ArrayProxy(ArrayVariable(self.index_bits, self.index_max + len(other), self.value_bits, 'concatenation{}'.format(uuid.uuid1())))
+        from .visitors import simplify
+
+        # FIXME This should be related to a constrainSet
+        new_arr = ArrayProxy(
+            ArrayVariable(
+                self.index_bits,
+                self.index_max + len(other),
+                self.value_bits,
+                "concatenation{}".format(uuid.uuid1()),
+            )
+        )
         for index in range(len(other)):
             new_arr[index] = simplify(other[index])
+        _concrete_cache = new_arr._concrete_cache
         for index in range(self.index_max):
             new_arr[index + len(other)] = simplify(self[index])
+        new_arr._concrete_cache.update(_concrete_cache)
         return new_arr
 
 
@@ -757,13 +860,15 @@ class ArrayVariable(Array, Variable):
 
     @property
     def declaration(self):
-        return f'(declare-fun {self.name} () (Array (_ BitVec {self.index_bits}) (_ BitVec {self.value_bits})))'
+        return f"(declare-fun {self.name} () (Array (_ BitVec {self.index_bits}) (_ BitVec {self.value_bits})))"
 
 
 class ArrayOperation(Array, Operation):
     def __init__(self, array, *operands, **kwargs):
         assert isinstance(array, Array)
-        super().__init__(array.index_bits, array.index_max, array.value_bits, array, *operands, **kwargs)
+        super().__init__(
+            array.index_bits, array.index_max, array.value_bits, array, *operands, **kwargs
+        )
 
 
 class ArrayStore(ArrayOperation):
@@ -830,29 +935,35 @@ class ArraySlice(Array):
         return self._array.select(index + self._slice_offset)
 
     def store(self, index, value):
-        return self._array.store(index + self.slice_offset, value)
+        return ArraySlice(
+            self._array.store(index + self._slice_offset, value),
+            self._slice_offset,
+            self._slice_size,
+        )
 
 
 class ArrayProxy(Array):
-    def __init__(self, array):
+    def __init__(self, array, default=None):
         assert isinstance(array, Array)
+        self._default = default
         self._concrete_cache = {}
         self._written = None
         if isinstance(array, ArrayProxy):
-            #copy constructor
+            # copy constructor
             super().__init__(array.index_bits, array.index_max, array.value_bits)
             self._array = array._array
             self._name = array._name
+            if default is None:
+                self._default = array._default
             self._concrete_cache = dict(array._concrete_cache)
-            if array._written is not None:
-                self._written = set(array._written)
+            self._written = set(array.written)
         elif isinstance(array, ArrayVariable):
-            #fresh array proxy
+            # fresh array proxy
             super().__init__(array.index_bits, array.index_max, array.value_bits)
             self._array = array
             self._name = array.name
         else:
-            #arrayproxy for a prepopulated array
+            # arrayproxy for a prepopulated array
             super().__init__(array.index_bits, array.index_max, array.value_bits)
             self._name = array.underlying_variable.name
             self._array = array
@@ -892,12 +1003,13 @@ class ArrayProxy(Array):
     def select(self, index):
         index = self.cast_index(index)
         if self.index_max is not None:
-            from manticore.core.smtlib.visitors import simplify
-            index = simplify(BitVecITE(self.index_bits, index < 0, self.index_max + index + 1, index))
+            from .visitors import simplify
 
+            index = simplify(
+                BitVecITE(self.index_bits, index < 0, self.index_max + index + 1, index)
+            )
         if isinstance(index, Constant) and index.value in self._concrete_cache:
             return self._concrete_cache[index.value]
-
         return self._array.select(index)
 
     def store(self, index, value):
@@ -905,25 +1017,35 @@ class ArrayProxy(Array):
             index = self.cast_index(index)
         if not isinstance(value, Expression):
             value = self.cast_value(value)
-        from manticore.core.smtlib.visitors import simplify
+        from .visitors import simplify
+
         index = simplify(index)
         if isinstance(index, Constant):
             self._concrete_cache[index.value] = value
+        else:
+            # delete all cache as we do not know what this may overwrite.
+            self._concrete_cache = {}
+
+        # potentially generate and update .written set
         self.written.add(index)
-        auxiliary = self._array.store(index, value)
-        self._array = auxiliary
+        self._array = self._array.store(index, value)
         return self
 
     def __getitem__(self, index):
         if isinstance(index, slice):
             start, stop = self._fix_index(index)
             size = self._get_size(index)
-            return ArrayProxy(ArraySlice(self, start, size))
+            array_proxy_slice = ArrayProxy(ArraySlice(self, start, size), default=self._default)
+            array_proxy_slice._concrete_cache = {}
+            for k, v in self._concrete_cache.items():
+                if k >= start and k < start + size:
+                    array_proxy_slice._concrete_cache[k - start] = v
+            return array_proxy_slice
         else:
             if self.index_max is not None:
                 if not isinstance(index, Expression) and index >= self.index_max:
                     raise IndexError
-            return self.select(index)
+            return self.get(index, self._default)
 
     def __setitem__(self, index, value):
         if isinstance(index, slice):
@@ -937,51 +1059,65 @@ class ArrayProxy(Array):
 
     def __getstate__(self):
         state = {}
-        state['_array'] = self._array
-        state['name'] = self.name
-        state['_concrete_cache'] = self._concrete_cache
-        state['_written'] = self._written
+        state["_default"] = self._default
+        state["_array"] = self._array
+        state["name"] = self.name
+        state["_concrete_cache"] = self._concrete_cache
+        state["_written"] = self._written
         return state
 
     def __setstate__(self, state):
-        self._array = state['_array']
-        self._name = state['name']
-        self._concrete_cache = state['_concrete_cache']
-        self._written = state['_written']
+        self._default = state["_default"]
+        self._array = state["_array"]
+        self._name = state["name"]
+        self._concrete_cache = state["_concrete_cache"]
+        self._written = state["_written"]
 
     def __copy__(self):
         return ArrayProxy(self)
 
     @property
     def written(self):
+        # Calculate only first time
         if self._written is None:
             written = set()
+            # take out Proxy sleve
             array = self._array
+            offset = 0
+            if isinstance(array, ArraySlice):
+                # if it is a proxy over a slice take out the slice too
+                offset = array._slice_offset
+                array = array._array
             while not isinstance(array, ArrayVariable):
-                written.add(array.index)
+                # The index written to underlaying Array are displaced when sliced
+                written.add(array.index - offset)
                 array = array.array
+            assert isinstance(array, ArrayVariable)
             self._written = written
         return self._written
 
     def is_known(self, index):
-        #return reduce(BoolOr, map(lambda known_index: index == known_index, self.written), BoolConstant(False))
+        if isinstance(index, Constant) and index.value in self._concrete_cache:
+            return BoolConstant(True)
+
         is_known_index = BoolConstant(False)
         written = self.written
         for known_index in written:
             if isinstance(index, Constant) and isinstance(known_index, Constant):
                 if known_index.value == index.value:
                     return BoolConstant(True)
-                else:
-                    continue
             is_known_index = BoolOr(is_known_index.cast(index == known_index), is_known_index)
         return is_known_index
 
-    def get(self, index, default=0):
-        value = self.select(index)
-        if not isinstance(value, ArraySelect):
-            return value
-        is_known = self.is_known(index)
+    def get(self, index, default=None):
+        if default is None:
+            default = self._default
         index = self.cast_index(index)
+        value = self.select(index)
+        if default is None:
+            return value
+
+        is_known = self.is_known(index)
         default = self.cast_value(default)
         return BitVecITE(self._array.value_bits, is_known, value, default)
 
@@ -999,6 +1135,9 @@ class ArraySelect(BitVec, Operation):
     @property
     def index(self):
         return self.operands[1]
+
+    def __repr__(self):
+        return f"<ArraySelect obj with index={self.index}:\n{self.array}>"
 
 
 class BitVecSignExtend(BitVecOperation):
@@ -1025,8 +1164,20 @@ class BitVecExtract(BitVecOperation):
         assert isinstance(size, int)
         assert offset >= 0 and offset + size <= operand.size
         super().__init__(size, operand, *args, **kwargs)
-        self.begining = offset
-        self.end = offset + size - 1
+        self._begining = offset
+        self._end = offset + size - 1
+
+    @property
+    def value(self):
+        return self.operands[0]
+
+    @property
+    def begining(self):
+        return self._begining
+
+    @property
+    def end(self):
+        return self._end
 
 
 class BitVecConcat(BitVecOperation):

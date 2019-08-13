@@ -10,9 +10,9 @@ function install_mcore {
     pip uninstall -y Manticore || echo "Manticore not cached"  # uninstall any old, cached Manticore
 
 
-    # We only need to install keystone if we're just running regular tests
+    # We only need to install keystone if we're running tests other than ethereum
     EXTRAS="dev-noks"
-    if [ "$1" = "tests" ]; then
+    if [ "$1" != "ethereum" ]; then
         EXTRAS="dev"
     fi
 
@@ -26,12 +26,21 @@ function install_cc_env {
     pip install awscli
 }
 
-# install CodeClimate env in all conditions
-install_cc_env
-
-if [ "$1" != "env" ]; then
-    install_solc
-    install_mcore $1
+# Install black for initial formatting stage
+if [ "$1" == "format" ]; then
+    pip install -U black
 fi
 
+# Install CodeClimate env
+if [ "$1" != "format" ]; then
+    install_cc_env
+fi
+
+# Skip Manticore installation setup and teardown
+if [ "$1" != "env" ]; then
+    if [ "$1" != "format" ]; then
+        install_solc
+        install_mcore $1
+    fi
+fi
 
